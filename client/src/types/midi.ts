@@ -48,8 +48,8 @@ export interface MidiFile {
   tempos: TempoChange[];
   /** Time signature */
   timeSignature: TimeSignature;
-  /** Key signature */
-  keySignature: KeySignature;
+  /** Key signature, when the MIDI file explicitly provides one */
+  keySignature?: KeySignature;
   /** All tracks */
   tracks: MidiTrack[];
   /** Raw MIDI data for export */

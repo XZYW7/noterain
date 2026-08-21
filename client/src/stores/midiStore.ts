@@ -580,7 +580,7 @@ export function createSortedNotesIndex(file: MidiFile): { notes: MidiNote[]; max
 }
 
 /** Binary search to find the first note with startTime >= target */
-function binarySearchByStartTime(notes: MidiNote[], targetTime: number): number {
+export function findFirstNoteAtOrAfter(notes: MidiNote[], targetTime: number): number {
   let low = 0;
   let high = notes.length;
   while (low < high) {
@@ -612,7 +612,7 @@ export function getVisibleNotesFast(
   const windowEnd = currentTime + lookahead;
 
   // Find first note that could possibly be visible (started after windowStart)
-  const startIdx = binarySearchByStartTime(sortedNotes, windowStart);
+  const startIdx = findFirstNoteAtOrAfter(sortedNotes, windowStart);
 
   // Iterate until notes start after our lookahead window
   for (let i = startIdx; i < sortedNotes.length; i++) {
