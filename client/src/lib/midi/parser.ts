@@ -116,7 +116,7 @@ function extractTimeSignature(midi: MidiData): TimeSignature {
 }
 
 /** Extract key signature from MIDI data */
-function extractKeySignature(midi: MidiData): KeySignature {
+function extractKeySignature(midi: MidiData): KeySignature | undefined {
   for (const track of midi.tracks) {
     for (const event of track) {
       if (event.type === 'keySignature') {
@@ -127,7 +127,7 @@ function extractKeySignature(midi: MidiData): KeySignature {
       }
     }
   }
-  return { key: 0, scale: 0 }; // Default C major
+  return undefined;
 }
 
 /** Convert ticks to seconds using tempo map */
