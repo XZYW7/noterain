@@ -13,7 +13,12 @@ import {
   Dot,
 } from 'vexflow';
 import { useMidiStore } from '../../stores/midiStore';
-import type { MidiNote, MidiTrack } from '../../types/midi';
+import type {
+  KeySignature,
+  KeySignatureChange,
+  MidiNote,
+  MidiTrack,
+} from '../../types/midi';
 import styles from './SheetMusic.module.css';
 
 interface SheetMusicProps {
@@ -141,15 +146,54 @@ function detectKeySignature(notes: MidiNote[]): number {
   return bestKey;
 }
 
-/** Convert MIDI note number to VexFlow note name, considering key signature */
-function midiToVexFlow(
+interface WrittenPitch {
+  key: string;
+  letter: string;
+  octave: number;
+  alteration: -1 | 0 | 1;
+}
+
+const NATURAL_PITCH_CLASSES: Record<string, number> = {
+  c: 0,
+  d: 2,
+  e: 4,
+  f: 5,
+  g: 7,
+  a: 9,
+  b: 11,
+};
+
+/** Convert a sounding MIDI pitch to a written staff position. */
+function midiToWrittenPitch(
   noteNumber: number,
   keyNum: number,
-): { key: string; accidental?: string } {
+  spelling?: string,
+): WrittenPitch {
   const octave = Math.floor(noteNumber / 12) - 1;
   const pc = noteNumber % 12;
 
   const { sharps, flats } = getKeySignatureAlterations(keyNum);
+
+  if (spelling) {
+    const match = /^([A-G])(#|b)?(-?\d+)$/.exec(spelling);
+    if (match) {
+      const letter = match[1].toLowerCase();
+      const alteration = match[2] === '#' ? 1 : match[2] === 'b' ? -1 : 0;
+      const writtenOctave = Number(match[3]);
+      const writtenPitchClass =
+        (NATURAL_PITCH_CLASSES[letter] + alteration + 12) % 12;
+      const writtenMidi =
+        12 * (writtenOctave + 1) + NATURAL_PITCH_CLASSES[letter] + alteration;
+      if (writtenPitchClass === pc && writtenMidi === noteNumber) {
+        return {
+          key: `${letter}/${writtenOctave}`,
+          letter,
+          octave: writtenOctave,
+          alteration,
+        };
+      }
+    }
+  }
 
   // Pitch classes: C=0, C#=1, D=2, D#=3, E=4, F=5, F#=6, G=7, G#=8, A=9, A#=10, B=11
   const naturalNames = [
@@ -169,14 +213,12 @@ function midiToVexFlow(
   const isBlackKey = [1, 3, 6, 8, 10].includes(pc);
 
   let noteName = naturalNames[pc];
-  let accidental: string | undefined;
+  let alteration: -1 | 0 | 1 = 0;
 
   if (isBlackKey) {
     if (sharps.has(pc)) {
-      // In key signature as sharp - no accidental needed
-      accidental = undefined;
+      alteration = 1;
     } else if (flats.has(pc)) {
-      // In key signature as flat - use flat note name, no accidental
       const flatNames = [
         'c',
         'd',
@@ -192,17 +234,56 @@ function midiToVexFlow(
         'b',
       ];
       noteName = flatNames[pc];
-      accidental = undefined;
+      alteration = -1;
     } else {
-      // Not in key signature - need accidental
-      accidental = '#';
+      alteration = 1;
     }
   }
 
   return {
     key: `${noteName}/${octave}`,
-    accidental,
+    letter: noteName,
+    octave,
+    alteration,
   };
+}
+
+function keySignatureAlteration(letter: string, keyNum: number): -1 | 0 | 1 {
+  const sharpLetters = ['f', 'c', 'g', 'd', 'a', 'e', 'b'];
+  const flatLetters = ['b', 'e', 'a', 'd', 'g', 'c', 'f'];
+  if (keyNum > 0 && sharpLetters.slice(0, keyNum).includes(letter)) return 1;
+  if (keyNum < 0 && flatLetters.slice(0, -keyNum).includes(letter)) return -1;
+  return 0;
+}
+
+/** Return only the accidental that must be printed at this point in a measure. */
+function writtenAccidental(
+  pitch: WrittenPitch,
+  keyNum: number,
+  measureState: Map<string, -1 | 0 | 1>,
+): string | undefined {
+  const position = `${pitch.letter}/${pitch.octave}`;
+  const previous =
+    measureState.get(position) ?? keySignatureAlteration(pitch.letter, keyNum);
+  if (previous === pitch.alteration) return undefined;
+
+  measureState.set(position, pitch.alteration);
+  if (pitch.alteration === 1) return '#';
+  if (pitch.alteration === -1) return 'b';
+  return 'n';
+}
+
+function keySignatureAtTime(
+  changes: KeySignatureChange[],
+  fallback: KeySignature,
+  time: number,
+): KeySignature {
+  let current = fallback;
+  for (const change of changes) {
+    if (change.time > time + 0.001) break;
+    current = change;
+  }
+  return current;
 }
 
 /** Get note duration string for VexFlow based on beats */
@@ -548,6 +629,7 @@ function createVoicesForMeasure(
 
     // Create VexFlow notes
     const staveNotes: (StaveNote | GhostNote)[] = [];
+    const accidentalState = new Map<string, -1 | 0 | 1>();
     let currentBeat = 0;
 
     for (const beatKey of unifiedBeatGrid) {
@@ -581,9 +663,13 @@ function createVoicesForMeasure(
         const keys: string[] = [];
         const accidentals: (string | undefined)[] = [];
         for (const note of notes) {
-          const { key, accidental } = midiToVexFlow(note.noteNumber, keyNum);
-          keys.push(key);
-          accidentals.push(accidental);
+          const pitch = midiToWrittenPitch(
+            note.noteNumber,
+            keyNum,
+            note.spelling,
+          );
+          keys.push(pitch.key);
+          accidentals.push(writtenAccidental(pitch, keyNum, accidentalState));
         }
 
         const remainingInMeasure = quarterNotesPerMeasure - noteBeat;
@@ -752,10 +838,14 @@ export function SheetMusic({
     const allNotes = enabledTracks.flatMap((t) => t.notes);
     // MIDI key value 0 is an explicit C major/A minor signature, not a
     // missing value. Only auto-detect when the file has no key event at all.
-    const keyNum =
-      currentFile.keySignature?.key ?? detectKeySignature(allNotes);
-    const keyScale = currentFile.keySignature?.scale ?? 0;
-    const vexFlowKey = midiKeyToVexFlow(keyNum, keyScale);
+    const fallbackKeySignature: KeySignature = currentFile.keySignature ?? {
+      key: detectKeySignature(allNotes),
+      scale: 0,
+    };
+    const keySignatureChanges =
+      currentFile.keySignatures && currentFile.keySignatures.length > 0
+        ? currentFile.keySignatures
+        : [{ time: 0, ...fallbackKeySignature }];
 
     // Group each track's notes into measures
     const trackMeasures: {
@@ -777,6 +867,13 @@ export function SheetMusic({
     // Calculate quarter notes per measure for layout scaling
     // e.g., 4/4 = 4, 3/4 = 3, 6/8 = 3, 2/4 = 2
     const quarterNotesPerMeasure = beatsPerMeasure * (4 / beatValue);
+    const secondsPerQuarterNote = 60 / bpm;
+    const keyForMeasure = (measureIndex: number) =>
+      keySignatureAtTime(
+        keySignatureChanges,
+        fallbackKeySignature,
+        measureIndex * quarterNotesPerMeasure * secondsPerQuarterNote,
+      );
 
     const measureCount = trackMeasures[0]?.measures.length || 0;
 
@@ -798,7 +895,7 @@ export function SheetMusic({
         bpm,
         beatsPerMeasure,
         beatValue,
-        keyNum,
+        keyForMeasure(measureIndex).key,
         quarterNotesPerMeasure,
       );
 
@@ -872,8 +969,6 @@ export function SheetMusic({
       width: number;
       height: number;
     }[] = [];
-    const secondsPerQuarterNote = 60 / bpm;
-
     // ============ SECOND PASS: Render each line with uniform measure widths ============
     for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
       const measureIndices = lines[lineIndex];
@@ -890,6 +985,15 @@ export function SheetMusic({
       for (let posInLine = 0; posInLine < measureIndices.length; posInLine++) {
         const measureIndex = measureIndices[posInLine];
         const isFirstInLine = posInLine === 0;
+        const measureKey = keyForMeasure(measureIndex);
+        const previousMeasureKey =
+          measureIndex > 0 ? keyForMeasure(measureIndex - 1) : measureKey;
+        const keyNum = measureKey.key;
+        const vexFlowKey = midiKeyToVexFlow(measureKey.key, measureKey.scale);
+        const keyChanged =
+          measureIndex > 0 &&
+          (measureKey.key !== previousMeasureKey.key ||
+            measureKey.scale !== previousMeasureKey.scale);
 
         // All measures get equal width, first one gets extra space for clef/key/time
         const staveWidth = isFirstInLine
@@ -970,6 +1074,8 @@ export function SheetMusic({
             if (lineIndex === 0) {
               stave.addTimeSignature(`${beatsPerMeasure}/${beatValue}`);
             }
+          } else if (keyChanged) {
+            stave.addKeySignature(vexFlowKey);
           }
           stave.setStyle({ strokeStyle: staveColor, fillStyle: staveColor });
           stave.setContext(context);
@@ -991,6 +1097,7 @@ export function SheetMusic({
 
           // Create VexFlow notes
           const staveNotes: (StaveNote | GhostNote)[] = [];
+          const accidentalState = new Map<string, -1 | 0 | 1>();
           const noteTimings: {
             startTime: number;
             endTime: number;
@@ -1030,12 +1137,15 @@ export function SheetMusic({
               const keys: string[] = [];
               const accidentals: (string | undefined)[] = [];
               for (const note of notes) {
-                const { key, accidental } = midiToVexFlow(
+                const pitch = midiToWrittenPitch(
                   note.noteNumber,
                   keyNum,
+                  note.spelling,
                 );
-                keys.push(key);
-                accidentals.push(accidental);
+                keys.push(pitch.key);
+                accidentals.push(
+                  writtenAccidental(pitch, keyNum, accidentalState),
+                );
               }
 
               const remainingInMeasure = quarterNotesPerMeasure - noteBeat;
