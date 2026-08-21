@@ -732,8 +732,9 @@ export function SheetMusic({
 
     // Get key signature from file, or detect from notes if not present
     const allNotes = enabledTracks.flatMap((t) => t.notes);
-    const fileKeyNum = currentFile.keySignature?.key ?? 0;
-    const keyNum = fileKeyNum !== 0 ? fileKeyNum : detectKeySignature(allNotes);
+    // MIDI key value 0 is an explicit C major/A minor signature, not a
+    // missing value. Only auto-detect when the file has no key event at all.
+    const keyNum = currentFile.keySignature?.key ?? detectKeySignature(allNotes);
     const keyScale = currentFile.keySignature?.scale ?? 0;
     const vexFlowKey = midiKeyToVexFlow(keyNum, keyScale);
 
