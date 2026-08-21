@@ -12,8 +12,6 @@ export interface MidiNote {
   track: number;
   /** Channel (0-15) */
   channel: number;
-  /** Optional written pitch hint (for example E#4) from a MIDI text event */
-  spelling?: string;
 }
 
 /** A MIDI track containing notes and metadata */
@@ -52,7 +50,7 @@ export interface MidiFile {
   timeSignature: TimeSignature;
   /** Key signature, when the MIDI file explicitly provides one */
   keySignature?: KeySignature;
-  /** All explicit key-signature changes in playback order */
+  /** Key-signature changes in playback order, including the initial key */
   keySignatures?: KeySignatureChange[];
   /** All tracks */
   tracks: MidiTrack[];
@@ -84,7 +82,7 @@ export interface KeySignature {
   scale: number;
 }
 
-/** A key signature change at an absolute playback time */
+/** A key signature event at a position in the piece (seconds from start). */
 export interface KeySignatureChange extends KeySignature {
   time: number;
 }
