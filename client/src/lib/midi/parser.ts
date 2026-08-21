@@ -5,7 +5,7 @@ import type {
   MidiNote,
   TempoChange,
   TimeSignature,
-  KeySignature,
+  KeySignatureChange,
 } from '../../types/midi';
 import { generateId, saveRawMidiData } from '../../utils/storage';
 
@@ -30,7 +30,8 @@ export function parseMidiFile(data: ArrayBuffer, fileName: string): MidiFile {
   const ticksPerBeat = parsed.header.ticksPerBeat || 480;
   const tempos = extractTempos(parsed, ticksPerBeat);
   const timeSignature = extractTimeSignature(parsed);
-  const keySignature = extractKeySignature(parsed);
+  const keySignatures = extractKeySignatures(parsed, ticksPerBeat, tempos);
+  const keySignature = keySignatures[0];
   const tracks = extractTracks(parsed, ticksPerBeat, tempos);
   const duration = calculateDuration(tracks);
 
@@ -47,6 +48,7 @@ export function parseMidiFile(data: ArrayBuffer, fileName: string): MidiFile {
     tempos,
     timeSignature,
     keySignature,
+    keySignatures,
     tracks,
     lastModified: Date.now(),
   };
@@ -115,19 +117,27 @@ function extractTimeSignature(midi: MidiData): TimeSignature {
   return { numerator: 4, denominator: 4 }; // Default 4/4
 }
 
-/** Extract key signature from MIDI data */
-function extractKeySignature(midi: MidiData): KeySignature | undefined {
+/** Extract every key-signature change, preserving its absolute time. */
+function extractKeySignatures(
+  midi: MidiData,
+  ticksPerBeat: number,
+  tempos: TempoChange[],
+): KeySignatureChange[] {
+  const changes: KeySignatureChange[] = [];
   for (const track of midi.tracks) {
+    let currentTick = 0;
     for (const event of track) {
+      currentTick += event.deltaTime;
       if (event.type === 'keySignature') {
-        return {
+        changes.push({
+          time: ticksToSeconds(currentTick, ticksPerBeat, tempos),
           key: (event as any).key,    // -7 to 7 (flats to sharps)
           scale: (event as any).scale, // 0 = major, 1 = minor
-        };
+        });
       }
     }
   }
-  return undefined;
+  return changes.sort((a, b) => a.time - b.time);
 }
 
 /** Convert ticks to seconds using tempo map */
@@ -158,8 +168,12 @@ function extractTracks(
 
   midi.tracks.forEach((track, index) => {
     const notes: MidiNote[] = [];
-    const noteOnTimes: Map<string, { tick: number; velocity: number }> =
+    const noteOnTimes: Map<
+      string,
+      { tick: number; velocity: number; spelling?: string }
+    > =
       new Map();
+    const spellingHints = new Map<string, string>();
     let currentTick = 0;
     let trackName = `Track ${index + 1}`;
     let instrument = 'Piano';
@@ -175,9 +189,22 @@ function extractTracks(
         instrument = getInstrumentName(event.programNumber);
       }
 
+      if (event.type === 'text') {
+        const match = /^noterain:spell:(\d+):([A-G](?:#|b)?-?\d+)$/.exec(
+          event.text,
+        );
+        if (match) {
+          spellingHints.set(`${currentTick}-${Number(match[1])}`, match[2]);
+        }
+      }
+
       if (event.type === 'noteOn' && event.velocity > 0) {
         const key = `${event.channel}-${event.noteNumber}`;
-        noteOnTimes.set(key, { tick: currentTick, velocity: event.velocity });
+        noteOnTimes.set(key, {
+          tick: currentTick,
+          velocity: event.velocity,
+          spelling: spellingHints.get(`${currentTick}-${event.noteNumber}`),
+        });
       }
 
       if (
@@ -198,6 +225,7 @@ function extractTracks(
             velocity: noteOn.velocity,
             track: index,
             channel: event.channel,
+            spelling: noteOn.spelling,
           });
 
           noteOnTimes.delete(key);
@@ -300,6 +328,7 @@ export function createEmptyMidiFile(name: string): MidiFile {
     tempos: [{ time: 0, bpm: 120 }],
     timeSignature: { numerator: 4, denominator: 4 },
     keySignature: { key: 0, scale: 0 },
+    keySignatures: [{ time: 0, key: 0, scale: 0 }],
     tracks: [
       {
         index: 0,
