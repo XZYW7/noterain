@@ -10,6 +10,7 @@ import {
   StaveConnector,
   Beam,
   Fraction,
+  Dot,
 } from 'vexflow';
 import { useMidiStore } from '../../stores/midiStore';
 import type { MidiNote, MidiTrack } from '../../types/midi';
@@ -207,6 +208,7 @@ function midiToVexFlow(
 /** Get note duration string for VexFlow based on beats */
 function beatsToDuration(beats: number): string {
   if (beats >= 3.5) return 'w'; // whole (4 beats)
+  if (beats >= 2.75) return 'hd'; // dotted half (3 beats)
   if (beats >= 1.75) return 'h'; // half (2 beats)
   if (beats >= 0.875) return 'q'; // quarter (1 beat)
   if (beats >= 0.4375) return '8'; // eighth (0.5 beats)
@@ -219,6 +221,8 @@ function durationToBeats(duration: string): number {
   switch (duration) {
     case 'w':
       return 4;
+    case 'hd':
+      return 3;
     case 'h':
       return 2;
     case 'q':
@@ -363,15 +367,20 @@ function groupNotesIntoMeasures(
   for (let i = 0; i < measureCount; i++) {
     const startTime = i * secondsPerMeasure;
     const endTime = (i + 1) * secondsPerMeasure;
-    // Use small tolerance to handle floating-point precision at measure boundaries
-    const measureNotes = notes.filter((n) => {
-      // Quantize note start time to nearest 32nd note to avoid boundary issues
-      const quantizeGrid = secondsPerBeat / 8; // 32nd note
-      const quantizedTime =
-        Math.round(n.startTime / quantizeGrid) * quantizeGrid;
-      return quantizedTime >= startTime && quantizedTime < endTime;
-    });
-    measures.push({ startTime, endTime, notes: measureNotes });
+    measures.push({ startTime, endTime, notes: [] });
+  }
+
+  // Bucket notes by an integer 32nd-note grid. Comparing quantized seconds to
+  // floating-point measure boundaries can put a boundary note in the previous
+  // measure by a few quadrillionths of a second, after which it is discarded.
+  const quantizeGrid = secondsPerBeat / 8;
+  const gridStepsPerMeasure = beatsPerMeasure * 8;
+  for (const note of notes) {
+    const gridStep = Math.round(note.startTime / quantizeGrid);
+    const measureIndex = Math.floor(gridStep / gridStepsPerMeasure);
+    if (measureIndex >= 0 && measureIndex < measures.length) {
+      measures[measureIndex].notes.push(note);
+    }
   }
 
   return measures;
@@ -545,6 +554,13 @@ function createVoicesForMeasure(
       const noteBeat = beatKey / 1000;
       if (noteBeat >= quarterNotesPerMeasure) continue;
 
+      const notes = noteGroups.get(beatKey);
+      // The unified grid contains onsets from every track. Do not add a ghost
+      // note when this track already has a sustained note covering that beat.
+      if ((!notes || notes.length === 0) && noteBeat < currentBeat - 0.001) {
+        continue;
+      }
+
       // Add ghost notes to fill gap
       const gap = noteBeat - currentBeat;
       if (gap >= 0.125) {
@@ -561,7 +577,6 @@ function createVoicesForMeasure(
         }
       }
 
-      const notes = noteGroups.get(beatKey);
       if (notes && notes.length > 0) {
         const keys: string[] = [];
         const accidentals: (string | undefined)[] = [];
@@ -584,6 +599,9 @@ function createVoicesForMeasure(
             clef,
             autoStem: true,
           });
+          if (duration.endsWith('d')) {
+            Dot.buildAndAttach([staveNote], { all: true });
+          }
           accidentals.forEach((acc, i) => {
             if (acc) {
               staveNote.addModifier(new Accidental(acc), i);
@@ -734,7 +752,8 @@ export function SheetMusic({
     const allNotes = enabledTracks.flatMap((t) => t.notes);
     // MIDI key value 0 is an explicit C major/A minor signature, not a
     // missing value. Only auto-detect when the file has no key event at all.
-    const keyNum = currentFile.keySignature?.key ?? detectKeySignature(allNotes);
+    const keyNum =
+      currentFile.keySignature?.key ?? detectKeySignature(allNotes);
     const keyScale = currentFile.keySignature?.scale ?? 0;
     const vexFlowKey = midiKeyToVexFlow(keyNum, keyScale);
 
@@ -962,7 +981,6 @@ export function SheetMusic({
               noteGroups.get(beatKey)!.push(note);
             }
           }
-
           if (unifiedBeatGrid.length === 0) return;
 
           // Create VexFlow notes
@@ -978,6 +996,16 @@ export function SheetMusic({
             const noteBeat = beatKey / 1000;
             if (noteBeat >= quarterNotesPerMeasure) continue;
 
+            const notes = noteGroups.get(beatKey);
+            // The unified grid contains onsets from every track. Do not add a
+            // ghost note inside a sustained note in this track.
+            if (
+              (!notes || notes.length === 0) &&
+              noteBeat < currentBeat - 0.001
+            ) {
+              continue;
+            }
+
             // Fill gap with ghost notes
             const gap = noteBeat - currentBeat;
             if (gap >= 0.125) {
@@ -992,7 +1020,6 @@ export function SheetMusic({
               }
             }
 
-            const notes = noteGroups.get(beatKey);
             if (notes && notes.length > 0) {
               const keys: string[] = [];
               const accidentals: (string | undefined)[] = [];
@@ -1021,6 +1048,9 @@ export function SheetMusic({
                   clef,
                   autoStem: true,
                 });
+                if (duration.endsWith('d')) {
+                  Dot.buildAndAttach([staveNote], { all: true });
+                }
                 staveNote.setStyle({
                   fillStyle: noteColor,
                   strokeStyle: noteColor,
