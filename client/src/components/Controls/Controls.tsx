@@ -87,7 +87,7 @@ export function Controls({ isLoadingFullVelocity }: ControlsProps) {
       <div className={styles.header}>
         <div className={styles.headerLeft}>
           <img
-            src="/logo.png"
+            src={`${import.meta.env.BASE_URL}logo.png`}
             alt="noterain"
             className={styles.logo}
             style={{ background: 'white' }}
