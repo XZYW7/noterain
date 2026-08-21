@@ -1,4 +1,4 @@
 User-agent: *
 Allow: /
 
-Sitemap: https://noterain.app/sitemap.xml
+Sitemap: https://xzyw7.github.io/noterain/sitemap.xml

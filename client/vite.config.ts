@@ -8,6 +8,8 @@ import { version } from './package.json';
 const SAMPLES_CACHE_VERSION = version;
 
 export default defineConfig({
+  // GitHub Pages serves project sites from /<repository>/ rather than /.
+  base: process.env.VITE_BASE_PATH || '/',
   plugins: [
     react(),
     VitePWA({

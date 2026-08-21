@@ -54,7 +54,7 @@ const SAMPLE_NOTES = [
 
 /** Get base URL for a velocity layer */
 function getBaseUrl(velocityLayer: number): string {
-  return `/samples/piano/v${velocityLayer}/`;
+  return `${import.meta.env.BASE_URL}samples/piano/v${velocityLayer}/`;
 }
 
 /** Loading phases */
