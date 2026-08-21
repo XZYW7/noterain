@@ -1145,14 +1145,19 @@ export function SheetMusic({
       beatsPerMeasureProp ?? normalizedTimeSignature.numerator;
     const beatValue = normalizedTimeSignature.denominator;
 
-    // Get key signature from file, or detect from notes if not present
+    // Get the initial key signature from the file, or detect it when the MIDI
+    // has no explicit key event. Later key changes are applied per measure.
     const allNotes = enabledTracks.flatMap((t) => t.notes);
     // MIDI key value 0 is an explicit C major/A minor signature, not a
     // missing value. Only auto-detect when the file has no key event at all.
-    const keyNum =
-      currentFile.keySignature?.key ?? detectKeySignature(allNotes);
-    const keyScale = currentFile.keySignature?.scale ?? 0;
-    const vexFlowKey = midiKeyToVexFlow(keyNum, keyScale);
+    const fallbackKeySignature: KeySignature = currentFile.keySignature ?? {
+      key: detectKeySignature(allNotes),
+      scale: 0,
+    };
+    const keySignatureChanges =
+      currentFile.keySignatures && currentFile.keySignatures.length > 0
+        ? currentFile.keySignatures
+        : [{ time: 0, ...fallbackKeySignature }];
 
     // Group each track's notes into measures
     const trackMeasures: {
@@ -1174,6 +1179,13 @@ export function SheetMusic({
     // Calculate quarter notes per measure for layout scaling
     // e.g., 4/4 = 4, 3/4 = 3, 6/8 = 3, 2/4 = 2
     const quarterNotesPerMeasure = beatsPerMeasure * (4 / beatValue);
+    const secondsPerQuarterNote = 60 / bpm;
+    const keyForMeasure = (measureIndex: number) =>
+      keySignatureAtTime(
+        keySignatureChanges,
+        measureIndex * quarterNotesPerMeasure * secondsPerQuarterNote,
+        fallbackKeySignature,
+      );
 
     const measureCount = trackMeasures[0]?.measures.length || 0;
 
@@ -1195,7 +1207,7 @@ export function SheetMusic({
         bpm,
         beatsPerMeasure,
         beatValue,
-        keyNum,
+        keyForMeasure(measureIndex).key,
         quarterNotesPerMeasure,
       );
 
@@ -1304,6 +1316,18 @@ export function SheetMusic({
       for (let posInLine = 0; posInLine < measureIndices.length; posInLine++) {
         const measureIndex = measureIndices[posInLine];
         const isFirstInLine = posInLine === 0;
+        const measureKey = keyForMeasure(measureIndex);
+        const previousMeasureKey =
+          measureIndex > 0 ? keyForMeasure(measureIndex - 1) : measureKey;
+        const keyNum = measureKey.key;
+        const vexFlowKey = midiKeyToVexFlow(
+          measureKey.key,
+          measureKey.scale,
+        );
+        const keyChanged =
+          measureIndex > 0 &&
+          (measureKey.key !== previousMeasureKey.key ||
+            measureKey.scale !== previousMeasureKey.scale);
 
         const densityWidth =
           notationLineWidth *
@@ -1349,6 +1373,8 @@ export function SheetMusic({
             if (lineIndex === 0) {
               stave.addTimeSignature(`${beatsPerMeasure}/${beatValue}`);
             }
+          } else if (keyChanged) {
+            stave.addKeySignature(vexFlowKey);
           }
           stave.setStyle({ strokeStyle: staveColor, fillStyle: staveColor });
           stave.setContext(context);
