@@ -939,6 +939,12 @@ export function SheetMusic({
 
           // Create stave with calculated width
           const stave = new Stave(x, y, staveWidth);
+          // Show a one-based measure number once per measure, above the top stave.
+          // VexFlow centers it on the measure's left barline, matching standard notation.
+          // Do not call setFont() here: it invalidates Stave width metrics in VexFlow 5.
+          if (trackIndex === 0) {
+            stave.setMeasure(measureIndex + 1);
+          }
           if (isFirstInLine) {
             stave.addClef(clef);
             stave.addKeySignature(vexFlowKey);
