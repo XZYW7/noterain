@@ -2,9 +2,7 @@ name: Deploy NoteRain to GitHub Pages
 
 on:
   push:
-    branches: ['**']
-  pull_request:
-    branches: [main]
+    branches: [deploy/github-pages]
   workflow_dispatch:
 
 permissions:
@@ -35,17 +33,17 @@ jobs:
         run: bun run build:client
 
       - name: Configure Pages
-        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        if: github.ref == 'refs/heads/deploy/github-pages'
         uses: actions/configure-pages@v5
 
       - name: Upload Pages artifact
-        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        if: github.ref == 'refs/heads/deploy/github-pages'
         uses: actions/upload-pages-artifact@v4
         with:
           path: dist/client
 
   deploy:
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    if: github.ref == 'refs/heads/deploy/github-pages'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
