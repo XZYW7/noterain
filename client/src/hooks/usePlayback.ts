@@ -1,5 +1,10 @@
 import { useEffect, useRef, useCallback } from 'react';
-import { useMidiStore, getMeasureTime, createSortedNotesIndex } from '../stores/midiStore';
+import {
+  useMidiStore,
+  getMeasureTime,
+  createSortedNotesIndex,
+  findFirstNoteAtOrAfter,
+} from '../stores/midiStore';
 import { useAudioEngine } from './useAudioEngine';
 import { MidiNote } from '../types/midi';
 
@@ -84,12 +89,8 @@ export function usePlayback() {
     trackMapRef.current = tMap;
     // Set cursor to first note at or after current time
     const sortedNotes = sortedNotesRef.current.notes;
-    let cursor = 0;
     const startTime = currentTimeRef.current;
-    while (cursor < sortedNotes.length && sortedNotes[cursor].startTime <= startTime) {
-      cursor++;
-    }
-    scheduleCursorRef.current = cursor;
+    scheduleCursorRef.current = findFirstNoteAtOrAfter(sortedNotes, startTime);
 
     // Build the sorted note list for wait mode (index-based tracking)
     buildWaitModeNoteList();
@@ -131,13 +132,7 @@ export function usePlayback() {
         resetWaitModeState(storeTime); // Reset wait mode cursor and satisfaction
         // Reset scheduling cursor via binary search
         const sn = sortedNotesRef.current.notes;
-        let lo = 0, hi = sn.length;
-        while (lo < hi) {
-          const mid = (lo + hi) >>> 1;
-          if (sn[mid].startTime <= storeTime) lo = mid + 1;
-          else hi = mid;
-        }
-        scheduleCursorRef.current = lo;
+        scheduleCursorRef.current = findFirstNoteAtOrAfter(sn, storeTime);
       }
 
       // Calculate new time using ref (not stale closure)
@@ -161,13 +156,7 @@ export function usePlayback() {
           resetWaitModeState(loopStartTime); // Reset wait mode on loop
           // Reset scheduling cursor via binary search
           const sn = sortedNotesRef.current.notes;
-          let lo = 0, hi = sn.length;
-          while (lo < hi) {
-            const mid = (lo + hi) >>> 1;
-            if (sn[mid].startTime <= loopStartTime) lo = mid + 1;
-            else hi = mid;
-          }
-          scheduleCursorRef.current = lo;
+          scheduleCursorRef.current = findFirstNoteAtOrAfter(sn, loopStartTime);
           seek(loopStartTime);
           animationFrameRef.current = requestAnimationFrame(tick);
           return;
