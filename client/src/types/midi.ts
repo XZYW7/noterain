@@ -12,6 +12,8 @@ export interface MidiNote {
   track: number;
   /** Channel (0-15) */
   channel: number;
+  /** Optional explicit written spelling, e.g. F##2 or B#2. */
+  spelling?: string;
 }
 
 /** A MIDI track containing notes and metadata */

@@ -173,20 +173,65 @@ interface SpelledMidiNote {
 }
 
 /**
- * Spell a MIDI pitch for the current key.
- *
- * MIDI stores only sounding pitch, so C and B# are indistinguishable. In a
- * sharp key, spell a pitch that would otherwise cancel the signature with the
- * preceding letter plus a sharp or double sharp (C -> B#, D -> C##, etc.).
- * Flat keys do the symmetric operation with flats and double flats.
+ * Spell a MIDI pitch for the current key. MIDI has no written spelling, so
+ * ordinary files use the reader-friendly natural/one-accidental spelling.
+ * A source may attach an explicit spelling hint for the rare notes that are
+ * genuinely written as B#, F##, or a double-flat.
  */
 function midiToVexFlow(
   noteNumber: number,
   keyNum: number,
+  spelling?: string,
   preferredSpelling?: 'bSharp',
 ): SpelledMidiNote {
   const octave = Math.floor(noteNumber / 12) - 1;
   const pc = noteNumber % 12;
+
+  if (spelling) {
+    const match = /^([A-Ga-g])(#{1,2}|b{1,2})?(-?\d+)$/.exec(spelling);
+    if (match) {
+      const naturalPitchClasses: Record<string, number> = {
+        c: 0,
+        d: 2,
+        e: 4,
+        f: 5,
+        g: 7,
+        a: 9,
+        b: 11,
+      };
+      const letter = match[1].toLowerCase();
+      const accidentalText = match[2] ?? '';
+      const alteration =
+        accidentalText === '##'
+          ? 2
+          : accidentalText === '#'
+            ? 1
+            : accidentalText === 'bb'
+              ? -2
+              : accidentalText === 'b'
+                ? -1
+                : 0;
+      const writtenOctave = Number(match[3]);
+      const writtenMidi =
+        12 * (writtenOctave + 1) + naturalPitchClasses[letter] + alteration;
+      if (writtenMidi === noteNumber) {
+        const effectiveAccidental: EffectiveAccidental =
+          alteration === 2
+            ? '##'
+            : alteration === 1
+              ? '#'
+              : alteration === -2
+                ? 'bb'
+                : alteration === -1
+                  ? 'b'
+                  : 'n';
+        return {
+          key: `${letter}/${writtenOctave}`,
+          effectiveAccidental,
+        };
+      }
+    }
+  }
 
   if (preferredSpelling === 'bSharp' && pc === 0) {
     return { key: `b/${octave - 1}`, effectiveAccidental: '#' };
@@ -211,56 +256,6 @@ function midiToVexFlow(
 
   let noteName = naturalNames[pc];
   let effectiveAccidental: EffectiveAccidental = 'n';
-
-  if (!isBlackKey && keyNum > 0) {
-    const sharpLetters = ['f', 'c', 'g', 'd', 'a', 'e', 'b'];
-    const signatureAltersLetter = sharpLetters
-      .slice(0, keyNum)
-      .includes(noteName);
-    if (signatureAltersLetter) {
-      const sharpEnharmonics: Record<
-        number,
-        { name: string; octaveDelta: number; accidental: '#' | '##' }
-      > = {
-        0: { name: 'b', octaveDelta: -1, accidental: '#' },
-        2: { name: 'c', octaveDelta: 0, accidental: '##' },
-        4: { name: 'd', octaveDelta: 0, accidental: '##' },
-        5: { name: 'e', octaveDelta: 0, accidental: '#' },
-        7: { name: 'f', octaveDelta: 0, accidental: '##' },
-        9: { name: 'g', octaveDelta: 0, accidental: '##' },
-        11: { name: 'a', octaveDelta: 0, accidental: '##' },
-      };
-      const spelling = sharpEnharmonics[pc];
-      return {
-        key: `${spelling.name}/${octave + spelling.octaveDelta}`,
-        effectiveAccidental: spelling.accidental,
-      };
-    }
-  } else if (!isBlackKey && keyNum < 0) {
-    const flatLetters = ['b', 'e', 'a', 'd', 'g', 'c', 'f'];
-    const signatureAltersLetter = flatLetters
-      .slice(0, -keyNum)
-      .includes(noteName);
-    if (signatureAltersLetter) {
-      const flatEnharmonics: Record<
-        number,
-        { name: string; octaveDelta: number; accidental: 'b' | 'bb' }
-      > = {
-        0: { name: 'd', octaveDelta: 0, accidental: 'bb' },
-        2: { name: 'e', octaveDelta: 0, accidental: 'bb' },
-        4: { name: 'f', octaveDelta: 0, accidental: 'b' },
-        5: { name: 'g', octaveDelta: 0, accidental: 'bb' },
-        7: { name: 'a', octaveDelta: 0, accidental: 'bb' },
-        9: { name: 'b', octaveDelta: 0, accidental: 'bb' },
-        11: { name: 'c', octaveDelta: 1, accidental: 'b' },
-      };
-      const spelling = flatEnharmonics[pc];
-      return {
-        key: `${spelling.name}/${octave + spelling.octaveDelta}`,
-        effectiveAccidental: spelling.accidental,
-      };
-    }
-  }
 
   if (isBlackKey) {
     if (keyNum < 0) {
@@ -383,6 +378,7 @@ function getClefForTrack(notes: MidiNote[]): 'treble' | 'bass' {
 interface NotationNote {
   sourceId: string;
   noteNumber: number;
+  spelling?: string;
   startTime: number;
   endTime: number;
   originalStartTime: number;
@@ -449,6 +445,7 @@ function groupNotesIntoMeasures(
       measures[measureIndex].notes.push({
         sourceId,
         noteNumber: note.noteNumber,
+        spelling: note.spelling,
         startTime: segmentStartStep * quantizeGrid,
         endTime: segmentEndStep * quantizeGrid,
         originalStartTime: startStep * quantizeGrid,
@@ -852,6 +849,7 @@ function buildMeasureVoice(
           const { key, effectiveAccidental } = midiToVexFlow(
             activeNote.noteNumber,
             keyNum,
+            activeNote.spelling,
             spellAsBSharp ? 'bSharp' : undefined,
           );
           const previousAccidental =

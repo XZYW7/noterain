@@ -178,8 +178,11 @@ function extractTracks(
 
   midi.tracks.forEach((track, index) => {
     const notes: MidiNote[] = [];
-    const noteOnTimes: Map<string, { tick: number; velocity: number }> =
-      new Map();
+    const noteOnTimes: Map<
+      string,
+      { tick: number; velocity: number; spelling?: string }
+    > = new Map();
+    const spellingHints = new Map<string, string>();
     let currentTick = 0;
     let trackName = `Track ${index + 1}`;
     let instrument = 'Piano';
@@ -195,9 +198,22 @@ function extractTracks(
         instrument = getInstrumentName(event.programNumber);
       }
 
+      if (event.type === 'text') {
+        const match = /^noterain:spell:(\d+):([A-Ga-g](?:#{1,2}|b{1,2})?-?\d+)$/.exec(
+          event.text,
+        );
+        if (match) {
+          spellingHints.set(`${currentTick}-${Number(match[1])}`, match[2]);
+        }
+      }
+
       if (event.type === 'noteOn' && event.velocity > 0) {
         const key = `${event.channel}-${event.noteNumber}`;
-        noteOnTimes.set(key, { tick: currentTick, velocity: event.velocity });
+        noteOnTimes.set(key, {
+          tick: currentTick,
+          velocity: event.velocity,
+          spelling: spellingHints.get(`${currentTick}-${event.noteNumber}`),
+        });
       }
 
       if (
@@ -218,6 +234,7 @@ function extractTracks(
             velocity: noteOn.velocity,
             track: index,
             channel: event.channel,
+            spelling: noteOn.spelling,
           });
 
           noteOnTimes.delete(key);
