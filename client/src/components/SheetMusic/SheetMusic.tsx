@@ -13,6 +13,7 @@ import {
   Dot,
   StaveTie,
   Tuplet,
+  Stem,
 } from 'vexflow';
 import { useMidiStore } from '../../stores/midiStore';
 import type {
@@ -1357,6 +1358,7 @@ export function SheetMusic({
           staveNotes: (StaveNote | GhostNote)[];
           renderedChords: RenderedChord[];
           tuplets: Tuplet[];
+          trackIndex: number;
         }[] = [];
 
         // Create staves and voices for each track
@@ -1409,6 +1411,7 @@ export function SheetMusic({
             staveNotes: builtVoice.staveNotes,
             renderedChords: builtVoice.renderedChords,
             tuplets: builtVoice.tuplets,
+            trackIndex,
           });
 
           // Connect every uninterrupted source note between adjacent rendered
@@ -1461,8 +1464,21 @@ export function SheetMusic({
             voices.forEach((v) => formatter.joinVoices([v]));
             formatter.format(voices, Math.max(usableWidth, 20));
 
+            // Voice.draw() normally assigns each tickable's stave, but the
+            // beam collision pass below needs note Y positions before drawing.
+            voiceData.forEach(({ stave, staveNotes }) =>
+              staveNotes.forEach((note) => note.setStave(stave)),
+            );
+
             voiceData.forEach(
-              ({ voice, stave, staveNotes, renderedChords, tuplets }) => {
+              ({
+                voice,
+                stave,
+                staveNotes,
+                renderedChords,
+                tuplets,
+                trackIndex,
+              }) => {
               const beamGroups = getBeamGroupsForTimeSignature(
                 beatsPerMeasure,
                 beatValue,
@@ -1495,7 +1511,55 @@ export function SheetMusic({
                 }),
               );
               const tupletBeams = tuplets.map((tuplet) => {
-                const beam = new Beam(tuplet.getNotes() as StaveNote[]);
+                const notes = tuplet.getNotes() as StaveNote[];
+                // First give the whole group one automatic stem direction.
+                // If that puts its beam into a nearby adjacent stave, flip the
+                // group outward. High notes with enough inter-stave room keep
+                // their natural downward stems, so they do not hit the system
+                // above (as happened in m26).
+                let beam = new Beam(notes, true);
+                const direction = beam.getStemDirection();
+                const minX = Math.min(
+                  ...notes.map((note) => note.getAbsoluteX()),
+                );
+                const maxX = Math.max(
+                  ...notes.map((note) => note.getAbsoluteX()),
+                );
+                const adjacentTrackIndex =
+                  direction === Stem.DOWN ? trackIndex + 1 : trackIndex - 1;
+                const adjacentNotes =
+                  voiceData[adjacentTrackIndex]?.staveNotes.filter(
+                    (note): note is StaveNote =>
+                      note instanceof StaveNote &&
+                      note.getAbsoluteX() >= minX - 8 &&
+                      note.getAbsoluteX() <= maxX + 8,
+                  ) ?? [];
+                if (adjacentNotes.length > 0) {
+                  const groupTop = Math.min(
+                    ...notes.flatMap((note) => note.getYs()),
+                  );
+                  const groupBottom = Math.max(
+                    ...notes.flatMap((note) => note.getYs()),
+                  );
+                  const adjacentTop = Math.min(
+                    ...adjacentNotes.flatMap((note) => note.getYs()),
+                  );
+                  const adjacentBottom = Math.max(
+                    ...adjacentNotes.flatMap((note) => note.getYs()),
+                  );
+                  const interStaveGap =
+                    direction === Stem.DOWN
+                      ? adjacentTop - groupBottom
+                      : groupTop - adjacentBottom;
+                  if (interStaveGap < 90) {
+                    const outwardDirection =
+                      direction === Stem.DOWN ? Stem.UP : Stem.DOWN;
+                    notes.forEach((note) =>
+                      note.setStemDirection(outwardDirection),
+                    );
+                    beam = new Beam(notes);
+                  }
+                }
                 // Put the number on the beam side, just as standard engraving
                 // does: low runs above, very high runs below.
                 tuplet.setTupletLocation(beam.getStemDirection());
