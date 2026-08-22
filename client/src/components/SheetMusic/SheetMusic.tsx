@@ -16,6 +16,7 @@ import {
   Stem,
 } from 'vexflow';
 import { useMidiStore } from '../../stores/midiStore';
+import { spellPitchesPs13 } from '../../lib/midi/ps13';
 import type {
   KeySignature,
   KeySignatureChange,
@@ -33,9 +34,13 @@ interface SheetMusicProps {
  * Convert MIDI key signature (-7 to 7) to VexFlow key name
  * Negative = flats, positive = sharps
  */
-function midiKeyToVexFlow(key: number, scale: number): string {
-  // Major keys by number of sharps/flats
-  const majorKeys: Record<string, string> = {
+function midiKeyToVexFlow(key: number): string {
+  // A MIDI key-signature event already stores the signed number of accidentals.
+  // Major and minor modes with the same `key` value therefore use the same
+  // engraved signature; `scale` only identifies the mode. VexFlow interprets
+  // names such as "D" as D major, so mapping D minor to "D" would incorrectly
+  // draw two sharps instead of the one flat encoded by MIDI key = -1.
+  const signaturesByFifths: Record<string, string> = {
     '-7': 'Cb',
     '-6': 'Gb',
     '-5': 'Db',
@@ -52,27 +57,7 @@ function midiKeyToVexFlow(key: number, scale: number): string {
     '6': 'F#',
     '7': 'C#',
   };
-  // Minor keys (relative minor)
-  const minorKeys: Record<string, string> = {
-    '-7': 'Ab',
-    '-6': 'Eb',
-    '-5': 'Bb',
-    '-4': 'F',
-    '-3': 'C',
-    '-2': 'G',
-    '-1': 'D',
-    '0': 'A',
-    '1': 'E',
-    '2': 'B',
-    '3': 'F#',
-    '4': 'C#',
-    '5': 'G#',
-    '6': 'D#',
-    '7': 'A#',
-  };
-
-  const keyMap = scale === 1 ? minorKeys : majorKeys;
-  return keyMap[String(key)] || 'C';
+  return signaturesByFifths[String(key)] || 'C';
 }
 
 /** Get which pitch classes have sharps/flats for a given MIDI key signature */
@@ -401,6 +386,7 @@ function groupNotesIntoMeasures(
   bpm: number,
   beatsPerMeasure: number,
   beatValue: number = 4,
+  automaticSpellings?: ReadonlyMap<MidiNote, string>,
 ): Measure[] {
   const secondsPerQuarterNote = 60 / bpm;
   const quarterNotesPerMeasure = beatsPerMeasure * (4 / beatValue);
@@ -446,7 +432,9 @@ function groupNotesIntoMeasures(
       measures[measureIndex].notes.push({
         sourceId,
         noteNumber: note.noteNumber,
-        spelling: note.spelling,
+        // Explicit noterain:spell metadata is authoritative. PS13 supplies a
+        // context-sensitive spelling only for ordinary MIDI notes.
+        spelling: note.spelling ?? automaticSpellings?.get(note),
         startTime: segmentStartStep * quantizeGrid,
         endTime: segmentEndStep * quantizeGrid,
         originalStartTime: startStep * quantizeGrid,
@@ -1144,6 +1132,20 @@ export function SheetMusic({
       beatsPerMeasureProp ?? normalizedTimeSignature.numerator;
     const beatValue = normalizedTimeSignature.denominator;
 
+    // Spell ordinary pitched MIDI notes from their full musical context. Keep
+    // this independent of track visibility so hiding one staff cannot rename
+    // notes on another. General MIDI channel 10 is percussion, not pitched
+    // notation, and is deliberately excluded from PS13's harmonic context.
+    const pitchedNotes = currentFile.tracks
+      .flatMap((track) => track.notes)
+      .filter((note) => note.channel !== 9);
+    const ps13Results = spellPitchesPs13(pitchedNotes);
+    const automaticSpellings = new Map<MidiNote, string>();
+    pitchedNotes.forEach((note, index) => {
+      const spelling = ps13Results[index];
+      if (!note.spelling && spelling) automaticSpellings.set(note, spelling);
+    });
+
     // Get the initial key signature from the file, or detect it when the MIDI
     // has no explicit key event. Later key changes are applied per measure.
     const allNotes = enabledTracks.flatMap((t) => t.notes);
@@ -1171,6 +1173,7 @@ export function SheetMusic({
         bpm,
         beatsPerMeasure,
         beatValue,
+        automaticSpellings,
       ),
       clef: getClefForTrack(track.notes),
     }));
@@ -1319,14 +1322,8 @@ export function SheetMusic({
         const previousMeasureKey =
           measureIndex > 0 ? keyForMeasure(measureIndex - 1) : measureKey;
         const keyNum = measureKey.key;
-        const vexFlowKey = midiKeyToVexFlow(
-          measureKey.key,
-          measureKey.scale,
-        );
-        const previousVexFlowKey = midiKeyToVexFlow(
-          previousMeasureKey.key,
-          previousMeasureKey.scale,
-        );
+        const vexFlowKey = midiKeyToVexFlow(measureKey.key);
+        const previousVexFlowKey = midiKeyToVexFlow(previousMeasureKey.key);
         const keyChanged =
           measureIndex > 0 &&
           (measureKey.key !== previousMeasureKey.key ||
