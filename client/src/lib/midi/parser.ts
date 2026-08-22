@@ -31,7 +31,9 @@ export function parseMidiFile(data: ArrayBuffer, fileName: string): MidiFile {
   const tempos = extractTempos(parsed, ticksPerBeat);
   const timeSignature = extractTimeSignature(parsed);
   const keySignatures = extractKeySignatures(parsed, ticksPerBeat, tempos);
-  const keySignature = keySignatures[0];
+  const keySignature = keySignatures[0]
+    ? { key: keySignatures[0].key, scale: keySignatures[0].scale }
+    : undefined;
   const tracks = extractTracks(parsed, ticksPerBeat, tempos);
   const duration = calculateDuration(tracks);
 
@@ -117,7 +119,7 @@ function extractTimeSignature(midi: MidiData): TimeSignature {
   return { numerator: 4, denominator: 4 }; // Default 4/4
 }
 
-/** Extract every key-signature change, preserving its absolute time. */
+/** Extract all key-signature changes from MIDI data. */
 function extractKeySignatures(
   midi: MidiData,
   ticksPerBeat: number,
@@ -131,13 +133,21 @@ function extractKeySignatures(
       if (event.type === 'keySignature') {
         changes.push({
           time: ticksToSeconds(currentTick, ticksPerBeat, tempos),
-          key: (event as any).key,    // -7 to 7 (flats to sharps)
-          scale: (event as any).scale, // 0 = major, 1 = minor
+          key: event.key,
+          scale: event.scale,
         });
       }
     }
   }
-  return changes.sort((a, b) => a.time - b.time);
+
+  changes.sort((a, b) => a.time - b.time);
+  return changes.filter(
+    (change, index) =>
+      index === 0 ||
+      Math.abs(change.time - changes[index - 1].time) > 0.0001 ||
+      change.key !== changes[index - 1].key ||
+      change.scale !== changes[index - 1].scale,
+  );
 }
 
 /** Convert ticks to seconds using tempo map */
@@ -171,8 +181,7 @@ function extractTracks(
     const noteOnTimes: Map<
       string,
       { tick: number; velocity: number; spelling?: string }
-    > =
-      new Map();
+    > = new Map();
     const spellingHints = new Map<string, string>();
     let currentTick = 0;
     let trackName = `Track ${index + 1}`;
@@ -190,7 +199,7 @@ function extractTracks(
       }
 
       if (event.type === 'text') {
-        const match = /^noterain:spell:(\d+):([A-G](?:#|b)?-?\d+)$/.exec(
+        const match = /^noterain:spell:(\d+):([A-Ga-g](?:#{1,2}|b{1,2})?-?\d+)$/.exec(
           event.text,
         );
         if (match) {
