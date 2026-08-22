@@ -1322,10 +1322,17 @@ export function SheetMusic({
           measureKey.key,
           measureKey.scale,
         );
+        const previousVexFlowKey = midiKeyToVexFlow(
+          previousMeasureKey.key,
+          previousMeasureKey.scale,
+        );
         const keyChanged =
           measureIndex > 0 &&
           (measureKey.key !== previousMeasureKey.key ||
             measureKey.scale !== previousMeasureKey.scale);
+        // A zero-accidental destination has no visible key signature of its
+        // own, so cancel the preceding signature with natural signs.
+        const needsKeyCancellation = keyChanged && measureKey.key === 0;
 
         const densityWidth =
           notationLineWidth *
@@ -1367,12 +1374,18 @@ export function SheetMusic({
           }
           if (isFirstInLine) {
             stave.addClef(clef);
-            stave.addKeySignature(vexFlowKey);
+            stave.addKeySignature(
+              vexFlowKey,
+              needsKeyCancellation ? previousVexFlowKey : undefined,
+            );
             if (lineIndex === 0) {
               stave.addTimeSignature(`${beatsPerMeasure}/${beatValue}`);
             }
           } else if (keyChanged) {
-            stave.addKeySignature(vexFlowKey);
+            stave.addKeySignature(
+              vexFlowKey,
+              needsKeyCancellation ? previousVexFlowKey : undefined,
+            );
           }
           stave.setStyle({ strokeStyle: staveColor, fillStyle: staveColor });
           stave.setContext(context);
