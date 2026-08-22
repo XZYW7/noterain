@@ -11,6 +11,9 @@ import {
   Beam,
   Fraction,
   Dot,
+  StaveTie,
+  Tuplet,
+  Stem,
 } from 'vexflow';
 import { useMidiStore } from '../../stores/midiStore';
 import type {
@@ -146,53 +149,93 @@ function detectKeySignature(notes: MidiNote[]): number {
   return bestKey;
 }
 
-interface WrittenPitch {
-  key: string;
-  letter: string;
-  octave: number;
-  alteration: -1 | 0 | 1;
+/** Return the latest key signature active at a playback time. */
+function keySignatureAtTime(
+  changes: KeySignatureChange[],
+  time: number,
+  fallback: KeySignature,
+): KeySignature {
+  let active = fallback;
+  for (const change of changes) {
+    if (change.time <= time + 0.001) {
+      active = change;
+    } else {
+      break;
+    }
+  }
+  return active;
 }
 
-const NATURAL_PITCH_CLASSES: Record<string, number> = {
-  c: 0,
-  d: 2,
-  e: 4,
-  f: 5,
-  g: 7,
-  a: 9,
-  b: 11,
-};
+type EffectiveAccidental = '#' | '##' | 'b' | 'bb' | 'n';
 
-/** Convert a sounding MIDI pitch to a written staff position. */
-function midiToWrittenPitch(
+interface SpelledMidiNote {
+  key: string;
+  effectiveAccidental: EffectiveAccidental;
+}
+
+/**
+ * Spell a MIDI pitch for the current key. MIDI has no written spelling, so
+ * ordinary files use the reader-friendly natural/one-accidental spelling.
+ * A source may attach an explicit spelling hint for the rare notes that are
+ * genuinely written as B#, F##, or a double-flat.
+ */
+function midiToVexFlow(
   noteNumber: number,
   keyNum: number,
   spelling?: string,
-): WrittenPitch {
+  preferredSpelling?: 'bSharp',
+): SpelledMidiNote {
   const octave = Math.floor(noteNumber / 12) - 1;
   const pc = noteNumber % 12;
 
-  const { sharps, flats } = getKeySignatureAlterations(keyNum);
-
   if (spelling) {
-    const match = /^([A-G])(#|b)?(-?\d+)$/.exec(spelling);
+    const match = /^([A-Ga-g])(#{1,2}|b{1,2})?(-?\d+)$/.exec(spelling);
     if (match) {
+      const naturalPitchClasses: Record<string, number> = {
+        c: 0,
+        d: 2,
+        e: 4,
+        f: 5,
+        g: 7,
+        a: 9,
+        b: 11,
+      };
       const letter = match[1].toLowerCase();
-      const alteration = match[2] === '#' ? 1 : match[2] === 'b' ? -1 : 0;
+      const accidentalText = match[2] ?? '';
+      const alteration =
+        accidentalText === '##'
+          ? 2
+          : accidentalText === '#'
+            ? 1
+            : accidentalText === 'bb'
+              ? -2
+              : accidentalText === 'b'
+                ? -1
+                : 0;
       const writtenOctave = Number(match[3]);
-      const writtenPitchClass =
-        (NATURAL_PITCH_CLASSES[letter] + alteration + 12) % 12;
       const writtenMidi =
-        12 * (writtenOctave + 1) + NATURAL_PITCH_CLASSES[letter] + alteration;
-      if (writtenPitchClass === pc && writtenMidi === noteNumber) {
+        12 * (writtenOctave + 1) + naturalPitchClasses[letter] + alteration;
+      if (writtenMidi === noteNumber) {
+        const effectiveAccidental: EffectiveAccidental =
+          alteration === 2
+            ? '##'
+            : alteration === 1
+              ? '#'
+              : alteration === -2
+                ? 'bb'
+                : alteration === -1
+                  ? 'b'
+                  : 'n';
         return {
           key: `${letter}/${writtenOctave}`,
-          letter,
-          octave: writtenOctave,
-          alteration,
+          effectiveAccidental,
         };
       }
     }
+  }
+
+  if (preferredSpelling === 'bSharp' && pc === 0) {
+    return { key: `b/${octave - 1}`, effectiveAccidental: '#' };
   }
 
   // Pitch classes: C=0, C#=1, D=2, D#=3, E=4, F=5, F#=6, G=7, G#=8, A=9, A#=10, B=11
@@ -213,12 +256,10 @@ function midiToWrittenPitch(
   const isBlackKey = [1, 3, 6, 8, 10].includes(pc);
 
   let noteName = naturalNames[pc];
-  let alteration: -1 | 0 | 1 = 0;
+  let effectiveAccidental: EffectiveAccidental = 'n';
 
   if (isBlackKey) {
-    if (sharps.has(pc)) {
-      alteration = 1;
-    } else if (flats.has(pc)) {
+    if (keyNum < 0) {
       const flatNames = [
         'c',
         'd',
@@ -234,116 +275,35 @@ function midiToWrittenPitch(
         'b',
       ];
       noteName = flatNames[pc];
-      alteration = -1;
+      effectiveAccidental = 'b';
     } else {
-      alteration = 1;
+      // Sharp keys and a key-neutral MIDI file keep the conventional sharp
+      // spelling for black-key pitch classes.
+      effectiveAccidental = '#';
     }
   }
 
   return {
     key: `${noteName}/${octave}`,
-    letter: noteName,
-    octave,
-    alteration,
+    effectiveAccidental,
   };
 }
 
-function keySignatureAlteration(letter: string, keyNum: number): -1 | 0 | 1 {
+/** The accidental supplied by the key signature for a staff letter. */
+function getKeySignatureAccidental(
+  key: string,
+  keyNum: number,
+): EffectiveAccidental {
+  const noteName = key[0];
   const sharpLetters = ['f', 'c', 'g', 'd', 'a', 'e', 'b'];
   const flatLetters = ['b', 'e', 'a', 'd', 'g', 'c', 'f'];
-  if (keyNum > 0 && sharpLetters.slice(0, keyNum).includes(letter)) return 1;
-  if (keyNum < 0 && flatLetters.slice(0, -keyNum).includes(letter)) return -1;
-  return 0;
-}
-
-/** Return only the accidental that must be printed at this point in a measure. */
-function writtenAccidental(
-  pitch: WrittenPitch,
-  keyNum: number,
-  measureState: Map<string, -1 | 0 | 1>,
-): string | undefined {
-  const position = `${pitch.letter}/${pitch.octave}`;
-  const previous =
-    measureState.get(position) ?? keySignatureAlteration(pitch.letter, keyNum);
-  if (previous === pitch.alteration) return undefined;
-
-  measureState.set(position, pitch.alteration);
-  if (pitch.alteration === 1) return '#';
-  if (pitch.alteration === -1) return 'b';
+  if (keyNum > 0 && sharpLetters.slice(0, keyNum).includes(noteName)) {
+    return '#';
+  }
+  if (keyNum < 0 && flatLetters.slice(0, -keyNum).includes(noteName)) {
+    return 'b';
+  }
   return 'n';
-}
-
-function keySignatureAtTime(
-  changes: KeySignatureChange[],
-  fallback: KeySignature,
-  time: number,
-): KeySignature {
-  let current = fallback;
-  for (const change of changes) {
-    if (change.time > time + 0.001) break;
-    current = change;
-  }
-  return current;
-}
-
-/** Get note duration string for VexFlow based on beats */
-function beatsToDuration(beats: number): string {
-  if (beats >= 3.5) return 'w'; // whole (4 beats)
-  if (beats >= 2.75) return 'hd'; // dotted half (3 beats)
-  if (beats >= 1.75) return 'h'; // half (2 beats)
-  if (beats >= 0.875) return 'q'; // quarter (1 beat)
-  if (beats >= 0.4375) return '8'; // eighth (0.5 beats)
-  if (beats >= 0.21875) return '16'; // sixteenth (0.25 beats)
-  return '32'; // thirty-second (0.125 beats)
-}
-
-/** Get the beat value for a VexFlow duration */
-function durationToBeats(duration: string): number {
-  switch (duration) {
-    case 'w':
-      return 4;
-    case 'hd':
-      return 3;
-    case 'h':
-      return 2;
-    case 'q':
-      return 1;
-    case '8':
-      return 0.5;
-    case '16':
-      return 0.25;
-    case '32':
-      return 0.125;
-    default:
-      return 1;
-  }
-}
-
-/** Generate rests to fill a gap of specified beats */
-function generateRests(beats: number): string[] {
-  const rests: string[] = [];
-  let remaining = beats;
-
-  const restValues: [string, number][] = [
-    ['h', 2],
-    ['q', 1],
-    ['8', 0.5],
-    ['16', 0.25],
-    ['32', 0.125],
-  ];
-
-  while (remaining >= 0.125) {
-    for (const [duration, value] of restValues) {
-      if (remaining >= value - 0.001) {
-        rests.push(duration + 'r');
-        remaining -= value;
-        break;
-      }
-    }
-    if (remaining > 0 && remaining < 0.125) break;
-  }
-
-  return rests;
 }
 
 /**
@@ -407,13 +367,6 @@ function getBeamGroupsForTimeSignature(
   }
 }
 
-/** Get note duration string for VexFlow */
-function getDuration(durationSeconds: number, bpm: number): string {
-  const beatsPerSecond = bpm / 60;
-  const beats = durationSeconds * beatsPerSecond;
-  return beatsToDuration(beats);
-}
-
 /** Determine clef based on average note pitch */
 function getClefForTrack(notes: MidiNote[]): 'treble' | 'bass' {
   if (notes.length === 0) return 'treble';
@@ -422,11 +375,24 @@ function getClefForTrack(notes: MidiNote[]): 'treble' | 'bass' {
   return avgNote >= 60 ? 'treble' : 'bass'; // Middle C = 60
 }
 
+/** A note segment clipped to one measure, while retaining its source identity. */
+interface NotationNote {
+  sourceId: string;
+  noteNumber: number;
+  spelling?: string;
+  startTime: number;
+  endTime: number;
+  originalStartTime: number;
+  originalEndTime: number;
+  midiStartTime: number;
+  midiEndTime: number;
+}
+
 /** Group notes into measures */
 interface Measure {
   startTime: number;
   endTime: number;
-  notes: MidiNote[];
+  notes: NotationNote[];
 }
 
 function groupNotesIntoMeasures(
@@ -436,13 +402,14 @@ function groupNotesIntoMeasures(
   beatsPerMeasure: number,
   beatValue: number = 4,
 ): Measure[] {
-  // MIDI BPM is always based on quarter notes
   const secondsPerQuarterNote = 60 / bpm;
-  // Adjust for beat value: beatValue=4 means quarter note beats, beatValue=8 means eighth note beats
-  // One beat of the given value = (4 / beatValue) quarter notes
-  const secondsPerBeat = secondsPerQuarterNote * (4 / beatValue);
-  const secondsPerMeasure = secondsPerBeat * beatsPerMeasure;
-  const measureCount = Math.ceil(duration / secondsPerMeasure);
+  const quarterNotesPerMeasure = beatsPerMeasure * (4 / beatValue);
+  const secondsPerMeasure = secondsPerQuarterNote * quarterNotesPerMeasure;
+  const lastNoteEnd = notes.reduce(
+    (latest, note) => Math.max(latest, note.startTime + note.duration),
+    duration,
+  );
+  const measureCount = Math.max(1, Math.ceil(lastNoteEnd / secondsPerMeasure));
   const measures: Measure[] = [];
 
   for (let i = 0; i < measureCount; i++) {
@@ -451,20 +418,519 @@ function groupNotesIntoMeasures(
     measures.push({ startTime, endTime, notes: [] });
   }
 
-  // Bucket notes by an integer 32nd-note grid. Comparing quantized seconds to
-  // floating-point measure boundaries can put a boundary note in the previous
-  // measure by a few quadrillionths of a second, after which it is discarded.
-  const quantizeGrid = secondsPerBeat / 8;
-  const gridStepsPerMeasure = beatsPerMeasure * 8;
-  for (const note of notes) {
-    const gridStep = Math.round(note.startTime / quantizeGrid);
-    const measureIndex = Math.floor(gridStep / gridStepsPerMeasure);
-    if (measureIndex >= 0 && measureIndex < measures.length) {
-      measures[measureIndex].notes.push(note);
+  // Work on an integer 32nd-note grid. Each source note is clipped into every
+  // measure it overlaps so that sustained notes can be notated and tied across
+  // barlines instead of occupying only their onset measure.
+  const quantizeGrid = secondsPerQuarterNote / 8;
+  const gridStepsPerMeasure = Math.round(quarterNotesPerMeasure * 8);
+  notes.forEach((note, sourceIndex) => {
+    const startStep = Math.max(0, Math.round(note.startTime / quantizeGrid));
+    const endStep = Math.max(
+      startStep + 1,
+      Math.round((note.startTime + note.duration) / quantizeGrid),
+    );
+    const firstMeasure = Math.floor(startStep / gridStepsPerMeasure);
+    const lastMeasure = Math.floor((endStep - 1) / gridStepsPerMeasure);
+    const sourceId = `${note.track}:${note.channel}:${sourceIndex}:${startStep}`;
+
+    for (
+      let measureIndex = firstMeasure;
+      measureIndex <= lastMeasure && measureIndex < measures.length;
+      measureIndex++
+    ) {
+      if (measureIndex < 0) continue;
+      const measureStartStep = measureIndex * gridStepsPerMeasure;
+      const measureEndStep = measureStartStep + gridStepsPerMeasure;
+      const segmentStartStep = Math.max(startStep, measureStartStep);
+      const segmentEndStep = Math.min(endStep, measureEndStep);
+      measures[measureIndex].notes.push({
+        sourceId,
+        noteNumber: note.noteNumber,
+        spelling: note.spelling,
+        startTime: segmentStartStep * quantizeGrid,
+        endTime: segmentEndStep * quantizeGrid,
+        originalStartTime: startStep * quantizeGrid,
+        originalEndTime: endStep * quantizeGrid,
+        midiStartTime: note.startTime,
+        midiEndTime: note.startTime + note.duration,
+      });
+    }
+  });
+
+  return measures;
+}
+
+interface RenderedChord {
+  note: StaveNote;
+  sourceIndexes: Map<string, number>;
+  sourceOriginalEndTimes: Map<string, number>;
+  startTime: number;
+  endTime: number;
+}
+
+interface BuiltMeasureVoice {
+  voice: Voice;
+  staveNotes: (StaveNote | GhostNote)[];
+  renderedChords: RenderedChord[];
+  tuplets: Tuplet[];
+}
+
+interface DetectedTupletGroup {
+  id: string;
+  sourceIds: Set<string>;
+  duration: string;
+  numNotes: number;
+  notesOccupied: number;
+}
+
+interface PositionedChordSource {
+  note: StaveNote;
+  noteIndex: number;
+  endTime: number;
+  originalEndTime: number;
+  lineIndex: number;
+}
+
+interface PendingTie {
+  firstNote: StaveNote;
+  lastNote: StaveNote;
+  firstIndex: number;
+  lastIndex: number;
+  firstLineIndex: number;
+  lastLineIndex: number;
+}
+
+/** Split an exact beat span into values VexFlow can render without rounding. */
+function splitBeatSpan(
+  startBeat: number,
+  endBeat: number,
+): { duration: string; beats: number }[] {
+  const values: { duration: string; beats: number }[] = [
+    { duration: 'w', beats: 4 },
+    { duration: 'hd', beats: 3 },
+    { duration: 'h', beats: 2 },
+    { duration: 'qd', beats: 1.5 },
+    { duration: 'q', beats: 1 },
+    { duration: '8d', beats: 0.75 },
+    { duration: '8', beats: 0.5 },
+    { duration: '16d', beats: 0.375 },
+    { duration: '16', beats: 0.25 },
+    { duration: '32', beats: 0.125 },
+  ];
+  const result: { duration: string; beats: number }[] = [];
+  let cursor = startBeat;
+
+  while (endBeat - cursor >= 0.124) {
+    // If a note begins off the beat, finish that beat before choosing longer
+    // values. This produces conventional ties instead of a half note starting
+    // on the last sixteenth of a beat.
+    const fraction = cursor - Math.floor(cursor + 0.001);
+    const notationBoundary =
+      fraction > 0.001 ? Math.min(endBeat, Math.ceil(cursor - 0.001)) : endBeat;
+    const remaining = notationBoundary - cursor;
+    const chosen =
+      values.find((value) => value.beats <= remaining + 0.001) ??
+      values[values.length - 1];
+    result.push(chosen);
+    cursor += chosen.beats;
+  }
+
+  return result;
+}
+
+/** Detect the 7:6 and 9:8 equal-note tuplets used by the source score. */
+function detectTupletGroups(
+  measure: Measure,
+  secondsPerQuarterNote: number,
+): Map<string, DetectedTupletGroup> {
+  const bySource = new Map<string, NotationNote>();
+  measure.notes.forEach((note) => bySource.set(note.sourceId, note));
+  const sourceNotes = [...bySource.values()]
+    .filter(
+      (note) =>
+        note.midiStartTime >= measure.startTime - 0.001 &&
+        note.midiEndTime <= measure.endTime + 0.001,
+    )
+    .sort((a, b) => a.midiStartTime - b.midiStartTime);
+  const groupBySource = new Map<string, DetectedTupletGroup>();
+  const durationCandidates = [
+    { duration: '8', beats: 0.5 },
+    { duration: '16', beats: 0.25 },
+    { duration: '32', beats: 0.125 },
+  ];
+
+  let noteIndex = 0;
+  while (noteIndex < sourceNotes.length) {
+    let detected: DetectedTupletGroup | undefined;
+    for (const numNotes of [9, 7]) {
+      const notesOccupied = numNotes - 1;
+      const window = sourceNotes.slice(noteIndex, noteIndex + numNotes);
+      if (window.length !== numNotes) continue;
+      const intervals = window
+        .slice(1)
+        .map(
+          (note, index) => note.midiStartTime - window[index].midiStartTime,
+        );
+      const averageInterval =
+        intervals.reduce((sum, interval) => sum + interval, 0) /
+        intervals.length;
+      if (
+        averageInterval <= 0 ||
+        intervals.some(
+          (interval) =>
+            Math.abs(interval - averageInterval) > averageInterval * 0.08,
+        )
+      ) {
+        continue;
+      }
+      if (
+        window.some(
+          (note) =>
+            Math.abs(note.midiEndTime - note.midiStartTime - averageInterval) >
+            Math.max(0.005, averageInterval * 0.08),
+        )
+      ) {
+        continue;
+      }
+
+      const groupStartBeat =
+        (window[0].midiStartTime - measure.startTime) /
+        secondsPerQuarterNote;
+      const groupEndBeat =
+        (window[window.length - 1].midiEndTime - measure.startTime) /
+        secondsPerQuarterNote;
+      // The source score's 9:8 runs occupy one complete beat and its 7:6 run
+      // occupies the complete 3/4 bar. Without checking those beat boundaries,
+      // the tail of an ordinary 32nd-note group plus the head of a real tuplet
+      // can be misidentified as a shifted 9-tuplet (the old m25 corruption).
+      if (
+        Math.abs(groupStartBeat - Math.round(groupStartBeat)) > 0.02 ||
+        Math.abs(groupEndBeat - Math.round(groupEndBeat)) > 0.02
+      ) {
+        continue;
+      }
+
+      const spanBeats =
+        (window[window.length - 1].midiEndTime - window[0].midiStartTime) /
+        secondsPerQuarterNote;
+      const baseBeats = spanBeats / notesOccupied;
+      const durationMatch = durationCandidates.find(
+        // A real tuplet ratio lands almost exactly on its base note value.
+        // Keep this within MIDI tick-rounding error; a broad tolerance turns
+        // ordinary runs of nine 16ths or 32nds into false 9:8 tuplets.
+        (candidate) => Math.abs(candidate.beats - baseBeats) < 0.005,
+      );
+      if (!durationMatch) continue;
+
+      detected = {
+        id: `${measure.startTime}:${noteIndex}:${numNotes}`,
+        sourceIds: new Set(window.map((note) => note.sourceId)),
+        duration: durationMatch.duration,
+        numNotes,
+        notesOccupied,
+      };
+      detected.sourceIds.forEach((sourceId) =>
+        groupBySource.set(sourceId, detected!),
+      );
+      noteIndex += numNotes;
+      break;
+    }
+    if (!detected) noteIndex++;
+  }
+
+  return groupBySource;
+}
+
+/**
+ * Convert a piano-roll measure to a sequential notation voice.
+ *
+ * Overlapping MIDI notes are represented as a changing chord at every onset or
+ * release boundary. The same source note is then tied between adjacent chord
+ * slices. This preserves durations while keeping every tickable inside its bar.
+ */
+function buildMeasureVoice(
+  measure: Measure,
+  clef: 'treble' | 'bass',
+  bpm: number,
+  beatsPerMeasure: number,
+  beatValue: number,
+  keyNum: number,
+  quarterNotesPerMeasure: number,
+  noteColor?: string,
+): BuiltMeasureVoice {
+  const secondsPerQuarterNote = 60 / bpm;
+  const boundaries = new Set<number>([0, quarterNotesPerMeasure]);
+  const tupletGroupBySource = detectTupletGroups(
+    measure,
+    secondsPerQuarterNote,
+  );
+  const rollGroupBySource = new Map<
+    string,
+    { chordStartBeat: number; sourceIds: Set<string> }
+  >();
+
+  // Detect short rolled-chord attacks: staggered notes within one beat that
+  // share the same release. Their individual attacks stay single notes, and
+  // the accumulated chord begins on the next beat, matching piano engraving.
+  const notesByRelease = new Map<number, NotationNote[]>();
+  measure.notes.forEach((note) => {
+    if (
+      note.originalStartTime < measure.startTime - 0.001 ||
+      note.originalStartTime >= measure.endTime - 0.001
+    ) {
+      return;
+    }
+    const releaseKey = Math.round(note.originalEndTime * 1000);
+    const releaseGroup = notesByRelease.get(releaseKey) ?? [];
+    releaseGroup.push(note);
+    notesByRelease.set(releaseKey, releaseGroup);
+  });
+  notesByRelease.forEach((releaseGroup) => {
+    const uniqueStarts = [
+      ...new Set(
+        releaseGroup.map((note) => Math.round(note.originalStartTime * 1000)),
+      ),
+    ].sort((a, b) => a - b);
+    if (uniqueStarts.length < 2) return;
+    const firstStartTime = uniqueStarts[0] / 1000;
+    const lastStartTime = uniqueStarts[uniqueStarts.length - 1] / 1000;
+    if (lastStartTime - firstStartTime > secondsPerQuarterNote + 0.001) return;
+
+    const lastStartBeat =
+      (lastStartTime - measure.startTime) / secondsPerQuarterNote;
+    const chordStartBeat = Math.ceil(lastStartBeat - 0.001);
+    if (
+      chordStartBeat <= lastStartBeat + 0.001 ||
+      chordStartBeat >= quarterNotesPerMeasure
+    ) {
+      return;
+    }
+    const sourceIds = new Set(releaseGroup.map((note) => note.sourceId));
+    const rollGroup = { chordStartBeat, sourceIds };
+    releaseGroup.forEach((note) =>
+      rollGroupBySource.set(note.sourceId, rollGroup),
+    );
+    boundaries.add(chordStartBeat);
+  });
+
+  measure.notes.forEach((note) => {
+    const isTupletNote = tupletGroupBySource.has(note.sourceId);
+    const notationStartTime = isTupletNote
+      ? note.midiStartTime
+      : note.startTime;
+    const notationEndTime = isTupletNote ? note.midiEndTime : note.endTime;
+    const startBeat = Math.max(
+      0,
+      Math.min(
+        quarterNotesPerMeasure,
+        (notationStartTime - measure.startTime) / secondsPerQuarterNote,
+      ),
+    );
+    const endBeat = Math.max(
+      0,
+      Math.min(
+        quarterNotesPerMeasure,
+        (notationEndTime - measure.startTime) / secondsPerQuarterNote,
+      ),
+    );
+    if (isTupletNote) {
+      boundaries.add(startBeat);
+      boundaries.add(endBeat);
+    } else {
+      boundaries.add(Math.round(startBeat * 8) / 8);
+      boundaries.add(Math.round(endBeat * 8) / 8);
+    }
+  });
+
+  const sortedBoundaries = [...boundaries].sort((a, b) => a - b);
+  const staveNotes: (StaveNote | GhostNote)[] = [];
+  const renderedChords: RenderedChord[] = [];
+  const tupletNotesByGroup = new Map<
+    string,
+    { group: DetectedTupletGroup; notes: StaveNote[] }
+  >();
+  // Accidentals persist for the same staff position until the next barline.
+  // Tracking the effective accidental prevents a sustained or repeated pitch
+  // from receiving the same modifier on every generated notation slice.
+  const accidentalState = new Map<string, EffectiveAccidental>();
+
+  for (
+    let boundaryIndex = 0;
+    boundaryIndex < sortedBoundaries.length - 1;
+    boundaryIndex++
+  ) {
+    const intervalStart = sortedBoundaries[boundaryIndex];
+    const intervalEnd = sortedBoundaries[boundaryIndex + 1];
+    if (intervalEnd - intervalStart < 0.01) continue;
+
+    const activeByPitch = new Map<number, NotationNote>();
+    measure.notes.forEach((note) => {
+      const isTupletNote = tupletGroupBySource.has(note.sourceId);
+      const notationStartTime = isTupletNote
+        ? note.midiStartTime
+        : note.startTime;
+      const notationEndTime = isTupletNote ? note.midiEndTime : note.endTime;
+      const startBeat =
+        (notationStartTime - measure.startTime) / secondsPerQuarterNote;
+      const endBeat =
+        (notationEndTime - measure.startTime) / secondsPerQuarterNote;
+      if (
+        startBeat <= intervalStart + 0.001 &&
+        endBeat > intervalStart + 0.001
+      ) {
+        const existing = activeByPitch.get(note.noteNumber);
+        // MIDI can retrigger the same pitch before a prior note-off. A stave
+        // cannot show duplicate noteheads, so display the most recent attack.
+        if (!existing || note.originalStartTime >= existing.originalStartTime) {
+          activeByPitch.set(note.noteNumber, note);
+        }
+      }
+    });
+    let activeNotes = [...activeByPitch.values()].sort(
+      (a, b) => a.noteNumber - b.noteNumber,
+    );
+
+    // A rolled chord is commonly encoded as staggered long MIDI notes that all
+    // release together. Standard notation shows the individual attacks first,
+    // then the accumulated chord on the final attack. Avoid turning each early
+    // attack into an increasingly tall chord.
+    const intervalStartTime =
+      measure.startTime + intervalStart * secondsPerQuarterNote;
+    const notesStartingNow = activeNotes.filter(
+      (note) => Math.abs(note.originalStartTime - intervalStartTime) < 0.01,
+    );
+    const rolledAttackNotes = notesStartingNow.filter((note) => {
+      const rollGroup = rollGroupBySource.get(note.sourceId);
+      return (
+        rollGroup !== undefined &&
+        intervalStart < rollGroup.chordStartBeat - 0.001
+      );
+    });
+    if (rolledAttackNotes.length > 0) {
+      activeNotes = rolledAttackNotes;
+    }
+
+    let pieceStart = intervalStart;
+    const tupletGroup =
+      activeNotes.length === 1
+        ? tupletGroupBySource.get(activeNotes[0].sourceId)
+        : undefined;
+    const pieces = tupletGroup
+      ? [
+          {
+            duration: tupletGroup.duration,
+            beats: intervalEnd - intervalStart,
+          },
+        ]
+      : splitBeatSpan(intervalStart, intervalEnd);
+    for (const piece of pieces) {
+      const pieceEnd = Math.min(intervalEnd, pieceStart + piece.beats);
+      if (activeNotes.length === 0) {
+        staveNotes.push(new GhostNote({ duration: piece.duration }));
+      } else {
+        const keys: string[] = [];
+        const accidentals: (string | undefined)[] = [];
+        const sourceIndexes = new Map<string, number>();
+        const sourceOriginalEndTimes = new Map<string, number>();
+        activeNotes.forEach((activeNote, noteIndex) => {
+          const rollGroup = rollGroupBySource.get(activeNote.sourceId);
+          const rollPitchClasses = rollGroup
+            ? new Set(
+                measure.notes
+                  .filter((note) => rollGroup.sourceIds.has(note.sourceId))
+                  .map((note) => note.noteNumber % 12),
+              )
+            : undefined;
+          const spellAsBSharp =
+            activeNote.noteNumber % 12 === 0 &&
+            rollPitchClasses !== undefined &&
+            [8, 0, 3, 6].every((pitchClass) =>
+              rollPitchClasses.has(pitchClass),
+            );
+          const { key, effectiveAccidental } = midiToVexFlow(
+            activeNote.noteNumber,
+            keyNum,
+            activeNote.spelling,
+            spellAsBSharp ? 'bSharp' : undefined,
+          );
+          const previousAccidental =
+            accidentalState.get(key) ??
+            getKeySignatureAccidental(key, keyNum);
+          const tiedAcrossBarline =
+            pieceStart < 0.001 &&
+            activeNote.originalStartTime < measure.startTime - 0.001;
+          const accidental =
+            !tiedAcrossBarline && effectiveAccidental !== previousAccidental
+              ? effectiveAccidental
+              : undefined;
+          accidentalState.set(key, effectiveAccidental);
+          keys.push(key);
+          accidentals.push(accidental);
+          sourceIndexes.set(activeNote.sourceId, noteIndex);
+          sourceOriginalEndTimes.set(
+            activeNote.sourceId,
+            activeNote.originalEndTime,
+          );
+        });
+
+        const staveNote = new StaveNote({
+          keys,
+          duration: piece.duration,
+          clef,
+          autoStem: true,
+        });
+        if (piece.duration.endsWith('d')) {
+          Dot.buildAndAttach([staveNote], { all: true });
+        }
+        if (noteColor) {
+          staveNote.setStyle({
+            fillStyle: noteColor,
+            strokeStyle: noteColor,
+          });
+        }
+        accidentals.forEach((accidental, noteIndex) => {
+          if (accidental) {
+            staveNote.addModifier(new Accidental(accidental), noteIndex);
+          }
+        });
+        staveNotes.push(staveNote);
+        if (tupletGroup) {
+          const tupletNotes = tupletNotesByGroup.get(tupletGroup.id) ?? {
+            group: tupletGroup,
+            notes: [],
+          };
+          tupletNotes.notes.push(staveNote);
+          tupletNotesByGroup.set(tupletGroup.id, tupletNotes);
+        }
+        renderedChords.push({
+          note: staveNote,
+          sourceIndexes,
+          sourceOriginalEndTimes,
+          startTime: measure.startTime + pieceStart * secondsPerQuarterNote,
+          endTime: measure.startTime + pieceEnd * secondsPerQuarterNote,
+        });
+      }
+      pieceStart = pieceEnd;
     }
   }
 
-  return measures;
+  const tuplets = [...tupletNotesByGroup.values()]
+    .filter(({ group, notes }) => notes.length === group.numNotes)
+    .map(
+      ({ group, notes }) =>
+        new Tuplet(notes, {
+          numNotes: group.numNotes,
+          notesOccupied: group.notesOccupied,
+          bracketed: false,
+          ratioed: false,
+          location: 1,
+        }),
+    );
+  const voice = new Voice({ numBeats: beatsPerMeasure, beatValue }).setStrict(
+    false,
+  );
+  voice.addTickables(staveNotes);
+  return { voice, staveNotes, renderedChords, tuplets };
 }
 
 /** Stored position info for a rendered note */
@@ -564,179 +1030,23 @@ function createVoicesForMeasure(
   keyNum: number,
   quarterNotesPerMeasure: number,
 ): { voices: Voice[]; trackClefs: ('treble' | 'bass')[] } {
-  const secondsPerQuarterNote = 60 / bpm;
-
-  // Build unified beat grid across ALL tracks for this measure
-  const allBeatKeys = new Set<number>();
-  trackMeasures.forEach(({ measures }) => {
-    const measure = measures[measureIndex];
-    if (!measure || measure.notes.length === 0) return;
-    for (const note of measure.notes) {
-      const quarterBeatInMeasure =
-        (note.startTime - measure.startTime) / secondsPerQuarterNote;
-      const quantizedBeat = Math.round(quarterBeatInMeasure * 8) / 8;
-      const beatKey = Math.round(quantizedBeat * 1000);
-      if (beatKey / 1000 < quarterNotesPerMeasure) {
-        allBeatKeys.add(beatKey);
-      }
-    }
-  });
-  const unifiedBeatGrid = [...allBeatKeys].sort((a, b) => a - b);
-
-  // Build beat->duration map from notes that actually exist
-  const beatDurations = new Map<number, string>();
-  trackMeasures.forEach(({ measures }) => {
-    const measure = measures[measureIndex];
-    if (!measure || measure.notes.length === 0) return;
-    for (const note of measure.notes) {
-      const quarterBeatInMeasure =
-        (note.startTime - measure.startTime) / secondsPerQuarterNote;
-      const quantizedBeat = Math.round(quarterBeatInMeasure * 8) / 8;
-      const beatKey = Math.round(quantizedBeat * 1000);
-      if (!beatDurations.has(beatKey)) {
-        const duration = getDuration(note.duration, bpm);
-        beatDurations.set(beatKey, duration);
-      }
-    }
-  });
-
   const voices: Voice[] = [];
   const trackClefs: ('treble' | 'bass')[] = [];
 
-  // Create voices for each track
   trackMeasures.forEach(({ measures, clef }) => {
     const measure = measures[measureIndex];
-
-    // Group notes by beat position
-    const noteGroups: Map<number, MidiNote[]> = new Map();
-    if (measure && measure.notes.length > 0) {
-      for (const note of measure.notes) {
-        const quarterBeatInMeasure =
-          (note.startTime - measure.startTime) / secondsPerQuarterNote;
-        const quantizedBeat = Math.round(quarterBeatInMeasure * 8) / 8;
-        const beatKey = Math.round(quantizedBeat * 1000);
-        if (!noteGroups.has(beatKey)) {
-          noteGroups.set(beatKey, []);
-        }
-        noteGroups.get(beatKey)!.push(note);
-      }
-    }
-
-    // Skip if no notes in unified grid
-    if (unifiedBeatGrid.length === 0) {
-      return;
-    }
-
-    // Create VexFlow notes
-    const staveNotes: (StaveNote | GhostNote)[] = [];
-    const accidentalState = new Map<string, -1 | 0 | 1>();
-    let currentBeat = 0;
-
-    for (const beatKey of unifiedBeatGrid) {
-      const noteBeat = beatKey / 1000;
-      if (noteBeat >= quarterNotesPerMeasure) continue;
-
-      const notes = noteGroups.get(beatKey);
-      // The unified grid contains onsets from every track. Do not add a ghost
-      // note when this track already has a sustained note covering that beat.
-      if ((!notes || notes.length === 0) && noteBeat < currentBeat - 0.001) {
-        continue;
-      }
-
-      // Add ghost notes to fill gap
-      const gap = noteBeat - currentBeat;
-      if (gap >= 0.125) {
-        const restDurations = generateRests(gap);
-        for (const restDur of restDurations) {
-          try {
-            const ghostNote = new GhostNote({
-              duration: restDur.replace('r', ''),
-            });
-            staveNotes.push(ghostNote);
-          } catch {
-            // Skip notes that can't be created
-          }
-        }
-      }
-
-      if (notes && notes.length > 0) {
-        const keys: string[] = [];
-        const accidentals: (string | undefined)[] = [];
-        for (const note of notes) {
-          const pitch = midiToWrittenPitch(
-            note.noteNumber,
-            keyNum,
-            note.spelling,
-          );
-          keys.push(pitch.key);
-          accidentals.push(writtenAccidental(pitch, keyNum, accidentalState));
-        }
-
-        const remainingInMeasure = quarterNotesPerMeasure - noteBeat;
-        const rawDuration = getDuration(notes[0].duration, bpm);
-        const rawDurationBeats = durationToBeats(rawDuration);
-        const clampedBeats = Math.min(rawDurationBeats, remainingInMeasure);
-        const duration = beatsToDuration(clampedBeats);
-
-        try {
-          const staveNote = new StaveNote({
-            keys,
-            duration,
-            clef,
-            autoStem: true,
-          });
-          if (duration.endsWith('d')) {
-            Dot.buildAndAttach([staveNote], { all: true });
-          }
-          accidentals.forEach((acc, i) => {
-            if (acc) {
-              staveNote.addModifier(new Accidental(acc), i);
-            }
-          });
-          staveNotes.push(staveNote);
-          currentBeat = noteBeat + durationToBeats(duration);
-        } catch {
-          // Skip notes that can't be rendered
-        }
-      } else {
-        const ghostDuration = beatDurations.get(beatKey) || '8';
-        try {
-          const ghostNote = new GhostNote({ duration: ghostDuration });
-          staveNotes.push(ghostNote);
-          currentBeat = noteBeat + durationToBeats(ghostDuration);
-        } catch {
-          // Skip notes that can't be created
-        }
-      }
-    }
-
-    // Add trailing rests to fill measure
-    if (currentBeat < quarterNotesPerMeasure) {
-      const gap = quarterNotesPerMeasure - currentBeat;
-      if (gap >= 0.125) {
-        const restDurations = generateRests(gap);
-        for (const restDur of restDurations) {
-          try {
-            const ghostNote = new GhostNote({
-              duration: restDur.replace('r', ''),
-            });
-            staveNotes.push(ghostNote);
-          } catch {
-            // Skip notes that can't be created
-          }
-        }
-      }
-    }
-
-    if (staveNotes.length === 0) return;
-
-    // Create voice
-    const voice = new Voice({
-      numBeats: beatsPerMeasure,
-      beatValue,
-    }).setStrict(false);
-    voice.addTickables(staveNotes);
-    voices.push(voice);
+    if (!measure) return;
+    voices.push(
+      buildMeasureVoice(
+        measure,
+        clef,
+        bpm,
+        beatsPerMeasure,
+        beatValue,
+        keyNum,
+        quarterNotesPerMeasure,
+      ).voice,
+    );
     trackClefs.push(clef);
   });
 
@@ -834,7 +1144,8 @@ export function SheetMusic({
       beatsPerMeasureProp ?? normalizedTimeSignature.numerator;
     const beatValue = normalizedTimeSignature.denominator;
 
-    // Get key signature from file, or detect from notes if not present
+    // Get the initial key signature from the file, or detect it when the MIDI
+    // has no explicit key event. Later key changes are applied per measure.
     const allNotes = enabledTracks.flatMap((t) => t.notes);
     // MIDI key value 0 is an explicit C major/A minor signature, not a
     // missing value. Only auto-detect when the file has no key event at all.
@@ -871,8 +1182,8 @@ export function SheetMusic({
     const keyForMeasure = (measureIndex: number) =>
       keySignatureAtTime(
         keySignatureChanges,
-        fallbackKeySignature,
         measureIndex * quarterNotesPerMeasure * secondsPerQuarterNote,
+        fallbackKeySignature,
       );
 
     const measureCount = trackMeasures[0]?.measures.length || 0;
@@ -886,8 +1197,8 @@ export function SheetMusic({
     const clefKeyTimeWidth = 80; // Extra space for clef, key sig, time sig on first measure of line
     const measurePadding = 20; // Padding between measures
 
-    // ============ FIRST PASS: Calculate max minimum width across all measures ============
-    let maxMinWidth = 40; // minimum baseline
+    // ============ FIRST PASS: Calculate each measure's own minimum width ============
+    const measureMinWidths = Array(measureCount).fill(40) as number[];
     for (let measureIndex = 0; measureIndex < measureCount; measureIndex++) {
       const { voices } = createVoicesForMeasure(
         trackMeasures,
@@ -904,31 +1215,43 @@ export function SheetMusic({
           const formatter = new Formatter();
           voices.forEach((v) => formatter.joinVoices([v]));
           const minWidth = formatter.preCalculateMinTotalWidth(voices);
-          maxMinWidth = Math.max(maxMinWidth, minWidth);
+          measureMinWidths[measureIndex] = Math.max(40, minWidth);
         } catch {
           // ignore
         }
       }
     }
-    // ============ LAYOUT: Group measures into lines ============
+    // ============ LAYOUT: Pack measures by their actual notation density ============
     const availableWidth =
       totalAvailableWidth - leftMargin * 2 - clefKeyTimeWidth;
-    // Calculate base measures per line, then add extra to compress spacing
-    const baseMeasuresPerLine = Math.floor(
-      availableWidth / (maxMinWidth + measurePadding),
+    const targetMeasureWidths = measureMinWidths.map((minWidth) =>
+      Math.max(80, minWidth + measurePadding),
     );
-    const extraMeasures = 2; // Add extra measures per line to compress notes
-    const measuresPerLine = Math.max(1, baseMeasuresPerLine + extraMeasures);
-
+    const denseMeasureThreshold = availableWidth / 3;
     const lines: number[][] = [];
-    for (let i = 0; i < measureCount; i += measuresPerLine) {
-      lines.push(
-        Array.from(
-          { length: Math.min(measuresPerLine, measureCount - i) },
-          (_, j) => i + j,
-        ),
+    let currentLine: number[] = [];
+    let currentLineWidth = 0;
+    for (let measureIndex = 0; measureIndex < measureCount; measureIndex++) {
+      const targetWidth = targetMeasureWidths[measureIndex];
+      const lineContainsDenseMeasure = currentLine.some(
+        (index) => targetMeasureWidths[index] >= denseMeasureThreshold,
       );
+      const densityLimitReached =
+        currentLine.length >= 2 &&
+        (lineContainsDenseMeasure || targetWidth >= denseMeasureThreshold);
+      if (
+        currentLine.length > 0 &&
+        (currentLineWidth + targetWidth > availableWidth ||
+          densityLimitReached)
+      ) {
+        lines.push(currentLine);
+        currentLine = [];
+        currentLineWidth = 0;
+      }
+      currentLine.push(measureIndex);
+      currentLineWidth += targetWidth;
     }
+    if (currentLine.length > 0) lines.push(currentLine);
 
     // Store line info for scroll-to-seek calculation
     let cumulativeMeasures = 0;
@@ -969,16 +1292,23 @@ export function SheetMusic({
       width: number;
       height: number;
     }[] = [];
+    const pendingTies: PendingTie[] = [];
+    const lastChordBySource = new Map<string, PositionedChordSource>();
+
     // ============ SECOND PASS: Render each line with uniform measure widths ============
     for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
       const measureIndices = lines[lineIndex];
       const baseY = topMargin + lineIndex * systemHeight;
 
-      // Calculate uniform width for all measures on this line
+      // Preserve each measure's density-based width, then distribute any spare
+      // line space proportionally. Dense cadenzas no longer get the same narrow
+      // width as a neighboring measure with only a few notes.
       const totalLineWidth = totalAvailableWidth - leftMargin * 2;
-      const numMeasures = measureIndices.length;
-      // Distribute width equally, accounting for clef/key/time on first measure
-      const baseStaveWidth = (totalLineWidth - clefKeyTimeWidth) / numMeasures;
+      const lineTargetWidth = measureIndices.reduce(
+        (sum, index) => sum + targetMeasureWidths[index],
+        0,
+      );
+      const notationLineWidth = totalLineWidth - clefKeyTimeWidth;
 
       let x = leftMargin;
 
@@ -989,16 +1319,27 @@ export function SheetMusic({
         const previousMeasureKey =
           measureIndex > 0 ? keyForMeasure(measureIndex - 1) : measureKey;
         const keyNum = measureKey.key;
-        const vexFlowKey = midiKeyToVexFlow(measureKey.key, measureKey.scale);
+        const vexFlowKey = midiKeyToVexFlow(
+          measureKey.key,
+          measureKey.scale,
+        );
+        const previousVexFlowKey = midiKeyToVexFlow(
+          previousMeasureKey.key,
+          previousMeasureKey.scale,
+        );
         const keyChanged =
           measureIndex > 0 &&
           (measureKey.key !== previousMeasureKey.key ||
             measureKey.scale !== previousMeasureKey.scale);
+        // A zero-accidental destination has no visible key signature of its
+        // own, so cancel the preceding signature with natural signs.
+        const needsKeyCancellation = keyChanged && measureKey.key === 0;
 
-        // All measures get equal width, first one gets extra space for clef/key/time
-        const staveWidth = isFirstInLine
-          ? baseStaveWidth + clefKeyTimeWidth
-          : baseStaveWidth;
+        const densityWidth =
+          notationLineWidth *
+          (targetMeasureWidths[measureIndex] / lineTargetWidth);
+        const staveWidth =
+          densityWidth + (isFirstInLine ? clefKeyTimeWidth : 0);
 
         // Store measure position for click detection
         measurePositions.push({
@@ -1015,45 +1356,10 @@ export function SheetMusic({
           voice: Voice;
           stave: Stave;
           staveNotes: (StaveNote | GhostNote)[];
-          noteTimings: {
-            startTime: number;
-            endTime: number;
-            staveNoteIndex: number;
-          }[];
+          renderedChords: RenderedChord[];
+          tuplets: Tuplet[];
+          trackIndex: number;
         }[] = [];
-
-        // Build unified beat grid for this measure
-        const allBeatKeys = new Set<number>();
-        trackMeasures.forEach(({ measures }) => {
-          const measure = measures[measureIndex];
-          if (!measure || measure.notes.length === 0) return;
-          for (const note of measure.notes) {
-            const quarterBeatInMeasure =
-              (note.startTime - measure.startTime) / secondsPerQuarterNote;
-            const quantizedBeat = Math.round(quarterBeatInMeasure * 8) / 8;
-            const beatKey = Math.round(quantizedBeat * 1000);
-            if (beatKey / 1000 < quarterNotesPerMeasure) {
-              allBeatKeys.add(beatKey);
-            }
-          }
-        });
-        const unifiedBeatGrid = [...allBeatKeys].sort((a, b) => a - b);
-
-        // Build beat->duration map
-        const beatDurations = new Map<number, string>();
-        trackMeasures.forEach(({ measures }) => {
-          const measure = measures[measureIndex];
-          if (!measure || measure.notes.length === 0) return;
-          for (const note of measure.notes) {
-            const quarterBeatInMeasure =
-              (note.startTime - measure.startTime) / secondsPerQuarterNote;
-            const quantizedBeat = Math.round(quarterBeatInMeasure * 8) / 8;
-            const beatKey = Math.round(quantizedBeat * 1000);
-            if (!beatDurations.has(beatKey)) {
-              beatDurations.set(beatKey, getDuration(note.duration, bpm));
-            }
-          }
-        });
 
         // Create staves and voices for each track
         trackMeasures.forEach(({ measures, clef }, trackIndex) => {
@@ -1070,156 +1376,74 @@ export function SheetMusic({
           }
           if (isFirstInLine) {
             stave.addClef(clef);
-            stave.addKeySignature(vexFlowKey);
+            stave.addKeySignature(
+              vexFlowKey,
+              needsKeyCancellation ? previousVexFlowKey : undefined,
+            );
             if (lineIndex === 0) {
               stave.addTimeSignature(`${beatsPerMeasure}/${beatValue}`);
             }
           } else if (keyChanged) {
-            stave.addKeySignature(vexFlowKey);
+            stave.addKeySignature(
+              vexFlowKey,
+              needsKeyCancellation ? previousVexFlowKey : undefined,
+            );
           }
           stave.setStyle({ strokeStyle: staveColor, fillStyle: staveColor });
           stave.setContext(context);
           staves.push(stave);
+          if (!measure) return;
 
-          // Group notes by beat position
-          const noteGroups: Map<number, MidiNote[]> = new Map();
-          if (measure && measure.notes.length > 0) {
-            for (const note of measure.notes) {
-              const quarterBeatInMeasure =
-                (note.startTime - measure.startTime) / secondsPerQuarterNote;
-              const quantizedBeat = Math.round(quarterBeatInMeasure * 8) / 8;
-              const beatKey = Math.round(quantizedBeat * 1000);
-              if (!noteGroups.has(beatKey)) noteGroups.set(beatKey, []);
-              noteGroups.get(beatKey)!.push(note);
-            }
-          }
-          if (unifiedBeatGrid.length === 0) return;
-
-          // Create VexFlow notes
-          const staveNotes: (StaveNote | GhostNote)[] = [];
-          const accidentalState = new Map<string, -1 | 0 | 1>();
-          const noteTimings: {
-            startTime: number;
-            endTime: number;
-            staveNoteIndex: number;
-          }[] = [];
-          let currentBeat = 0;
-
-          for (const beatKey of unifiedBeatGrid) {
-            const noteBeat = beatKey / 1000;
-            if (noteBeat >= quarterNotesPerMeasure) continue;
-
-            const notes = noteGroups.get(beatKey);
-            // The unified grid contains onsets from every track. Do not add a
-            // ghost note inside a sustained note in this track.
-            if (
-              (!notes || notes.length === 0) &&
-              noteBeat < currentBeat - 0.001
-            ) {
-              continue;
-            }
-
-            // Fill gap with ghost notes
-            const gap = noteBeat - currentBeat;
-            if (gap >= 0.125) {
-              for (const restDur of generateRests(gap)) {
-                try {
-                  staveNotes.push(
-                    new GhostNote({ duration: restDur.replace('r', '') }),
-                  );
-                } catch {
-                  /* skip */
-                }
-              }
-            }
-
-            if (notes && notes.length > 0) {
-              const keys: string[] = [];
-              const accidentals: (string | undefined)[] = [];
-              for (const note of notes) {
-                const pitch = midiToWrittenPitch(
-                  note.noteNumber,
-                  keyNum,
-                  note.spelling,
-                );
-                keys.push(pitch.key);
-                accidentals.push(
-                  writtenAccidental(pitch, keyNum, accidentalState),
-                );
-              }
-
-              const remainingInMeasure = quarterNotesPerMeasure - noteBeat;
-              const rawDuration = getDuration(notes[0].duration, bpm);
-              const clampedBeats = Math.min(
-                durationToBeats(rawDuration),
-                remainingInMeasure,
-              );
-              const duration = beatsToDuration(clampedBeats);
-              const maxDuration = Math.max(...notes.map((n) => n.duration));
-
-              try {
-                const staveNote = new StaveNote({
-                  keys,
-                  duration,
-                  clef,
-                  autoStem: true,
-                });
-                if (duration.endsWith('d')) {
-                  Dot.buildAndAttach([staveNote], { all: true });
-                }
-                staveNote.setStyle({
-                  fillStyle: noteColor,
-                  strokeStyle: noteColor,
-                });
-                accidentals.forEach((acc, i) => {
-                  if (acc) staveNote.addModifier(new Accidental(acc), i);
-                });
-                staveNotes.push(staveNote);
-                noteTimings.push({
-                  startTime: notes[0].startTime,
-                  endTime: notes[0].startTime + maxDuration,
-                  staveNoteIndex: staveNotes.length - 1,
-                });
-                currentBeat = noteBeat + durationToBeats(duration);
-              } catch {
-                /* skip */
-              }
-            } else {
-              const ghostDuration = beatDurations.get(beatKey) || '8';
-              try {
-                staveNotes.push(new GhostNote({ duration: ghostDuration }));
-                currentBeat = noteBeat + durationToBeats(ghostDuration);
-              } catch {
-                /* skip */
-              }
-            }
-          }
-
-          // Fill trailing space
-          if (currentBeat < quarterNotesPerMeasure) {
-            const gap = quarterNotesPerMeasure - currentBeat;
-            if (gap >= 0.125) {
-              for (const restDur of generateRests(gap)) {
-                try {
-                  staveNotes.push(
-                    new GhostNote({ duration: restDur.replace('r', '') }),
-                  );
-                } catch {
-                  /* skip */
-                }
-              }
-            }
-          }
-
-          if (staveNotes.length === 0) return;
-
-          const voice = new Voice({
-            numBeats: beatsPerMeasure,
+          const builtVoice = buildMeasureVoice(
+            measure,
+            clef,
+            bpm,
+            beatsPerMeasure,
             beatValue,
-          }).setStrict(false);
-          voice.addTickables(staveNotes);
-          voices.push(voice);
-          voiceData.push({ voice, stave, staveNotes, noteTimings });
+            keyNum,
+            quarterNotesPerMeasure,
+            noteColor,
+          );
+          voices.push(builtVoice.voice);
+          voiceData.push({
+            voice: builtVoice.voice,
+            stave,
+            staveNotes: builtVoice.staveNotes,
+            renderedChords: builtVoice.renderedChords,
+            tuplets: builtVoice.tuplets,
+            trackIndex,
+          });
+
+          // Connect every uninterrupted source note between adjacent rendered
+          // chord slices. The final drawing pass handles system breaks.
+          builtVoice.renderedChords.forEach((renderedChord) => {
+            renderedChord.sourceIndexes.forEach((noteIndex, sourceId) => {
+              const previous = lastChordBySource.get(sourceId);
+              if (
+                previous &&
+                (Math.abs(previous.endTime - renderedChord.startTime) < 0.01 ||
+                  previous.originalEndTime >= renderedChord.startTime - 0.01)
+              ) {
+                pendingTies.push({
+                  firstNote: previous.note,
+                  lastNote: renderedChord.note,
+                  firstIndex: previous.noteIndex,
+                  lastIndex: noteIndex,
+                  firstLineIndex: previous.lineIndex,
+                  lastLineIndex: lineIndex,
+                });
+              }
+              lastChordBySource.set(sourceId, {
+                note: renderedChord.note,
+                noteIndex,
+                endTime: renderedChord.endTime,
+                originalEndTime:
+                  renderedChord.sourceOriginalEndTimes.get(sourceId) ??
+                  renderedChord.endTime,
+                lineIndex,
+              });
+            });
+          });
         });
 
         // Synchronize and draw staves
@@ -1240,41 +1464,140 @@ export function SheetMusic({
             voices.forEach((v) => formatter.joinVoices([v]));
             formatter.format(voices, Math.max(usableWidth, 20));
 
-            voiceData.forEach(({ voice, stave, staveNotes, noteTimings }) => {
+            // Voice.draw() normally assigns each tickable's stave, but the
+            // beam collision pass below needs note Y positions before drawing.
+            voiceData.forEach(({ stave, staveNotes }) =>
+              staveNotes.forEach((note) => note.setStave(stave)),
+            );
+
+            voiceData.forEach(
+              ({
+                voice,
+                stave,
+                staveNotes,
+                renderedChords,
+                tuplets,
+                trackIndex,
+              }) => {
               const beamGroups = getBeamGroupsForTimeSignature(
                 beatsPerMeasure,
                 beatValue,
               );
-              const beams = Beam.generateBeams(staveNotes, {
-                groups: beamGroups,
-                maintainStemDirections: true,
+              const tupletNoteSet = new Set(
+                tuplets.flatMap((tuplet) => tuplet.getNotes()),
+              );
+              const regularBeamSegments: (StaveNote | GhostNote)[][] = [];
+              let currentBeamSegment: (StaveNote | GhostNote)[] = [];
+              staveNotes.forEach((note) => {
+                if (tupletNoteSet.has(note)) {
+                  if (currentBeamSegment.length > 0) {
+                    regularBeamSegments.push(currentBeamSegment);
+                    currentBeamSegment = [];
+                  }
+                } else {
+                  currentBeamSegment.push(note);
+                }
+              });
+              if (currentBeamSegment.length > 0) {
+                regularBeamSegments.push(currentBeamSegment);
+              }
+              const beams = regularBeamSegments.flatMap((segment) =>
+                Beam.generateBeams(segment, {
+                  groups: beamGroups,
+                  // A rising run can cross the stave midpoint inside one beat.
+                  // Let the beam choose one group stem direction; preserving
+                  // each auto-stem direction splits m25's 32nds into 2 + 6.
+                  maintainStemDirections: false,
+                }),
+              );
+              const tupletBeams = tuplets.map((tuplet) => {
+                const notes = tuplet.getNotes() as StaveNote[];
+                // First give the whole group one automatic stem direction.
+                // If that puts its beam into a nearby adjacent stave, flip the
+                // group outward. High notes with enough inter-stave room keep
+                // their natural downward stems, so they do not hit the system
+                // above (as happened in m26).
+                let beam = new Beam(notes, true);
+                const direction = beam.getStemDirection();
+                const minX = Math.min(
+                  ...notes.map((note) => note.getAbsoluteX()),
+                );
+                const maxX = Math.max(
+                  ...notes.map((note) => note.getAbsoluteX()),
+                );
+                const adjacentTrackIndex =
+                  direction === Stem.DOWN ? trackIndex + 1 : trackIndex - 1;
+                const adjacentNotes =
+                  voiceData[adjacentTrackIndex]?.staveNotes.filter(
+                    (note): note is StaveNote =>
+                      note instanceof StaveNote &&
+                      note.getAbsoluteX() >= minX - 8 &&
+                      note.getAbsoluteX() <= maxX + 8,
+                  ) ?? [];
+                if (adjacentNotes.length > 0) {
+                  const groupTop = Math.min(
+                    ...notes.flatMap((note) => note.getYs()),
+                  );
+                  const groupBottom = Math.max(
+                    ...notes.flatMap((note) => note.getYs()),
+                  );
+                  const adjacentTop = Math.min(
+                    ...adjacentNotes.flatMap((note) => note.getYs()),
+                  );
+                  const adjacentBottom = Math.max(
+                    ...adjacentNotes.flatMap((note) => note.getYs()),
+                  );
+                  const interStaveGap =
+                    direction === Stem.DOWN
+                      ? adjacentTop - groupBottom
+                      : groupTop - adjacentBottom;
+                  if (interStaveGap < 90) {
+                    const outwardDirection =
+                      direction === Stem.DOWN ? Stem.UP : Stem.DOWN;
+                    notes.forEach((note) =>
+                      note.setStemDirection(outwardDirection),
+                    );
+                    beam = new Beam(notes);
+                  }
+                }
+                // Put the number on the beam side, just as standard engraving
+                // does: low runs above, very high runs below.
+                tuplet.setTupletLocation(beam.getStemDirection());
+                return beam;
               });
               voice.draw(context, stave);
-              beams.forEach((beam) => {
+              [...beams, ...tupletBeams].forEach((beam) => {
                 beam.setStyle({ fillStyle: noteColor, strokeStyle: noteColor });
                 beam.setContext(context).draw();
               });
+              tuplets.forEach((tuplet) => {
+                tuplet.setStyle({
+                  fillStyle: noteColor,
+                  strokeStyle: noteColor,
+                });
+                tuplet.setContext(context).draw();
+              });
 
-              noteTimings.forEach((timing) => {
+              renderedChords.forEach((renderedChord) => {
                 try {
-                  const staveNote = staveNotes[timing.staveNoteIndex];
-                  const noteX = staveNote.getAbsoluteX();
-                  const bb = staveNote.getBoundingBox();
+                  const noteX = renderedChord.note.getAbsoluteX();
+                  const bb = renderedChord.note.getBoundingBox();
                   if (bb) {
                     notePositions.push({
                       x: noteX,
                       y: bb.getY(),
                       width: 20,
                       height: bb.getH(),
-                      startTime: timing.startTime,
-                      endTime: timing.endTime,
+                      startTime: renderedChord.startTime,
+                      endTime: renderedChord.endTime,
                     });
                   }
                 } catch {
                   /* ignore */
                 }
               });
-            });
+              },
+            );
           } catch {
             /* ignore formatting errors */
           }
@@ -1328,6 +1651,43 @@ export function SheetMusic({
         x += staveWidth;
       }
     }
+
+    // Ties are drawn after every stave has been formatted. A tie crossing a
+    // system break is rendered as two conventional partial ties at line ends.
+    pendingTies.forEach((tieData) => {
+      try {
+        const tieStyle = {
+          fillStyle: noteColor,
+          strokeStyle: noteColor,
+        };
+        if (tieData.firstLineIndex === tieData.lastLineIndex) {
+          const tie = new StaveTie({
+            firstNote: tieData.firstNote,
+            lastNote: tieData.lastNote,
+            firstIndexes: [tieData.firstIndex],
+            lastIndexes: [tieData.lastIndex],
+          });
+          tie.setStyle(tieStyle);
+          tie.setContext(context).draw();
+        } else {
+          const outgoingTie = new StaveTie({
+            firstNote: tieData.firstNote,
+            firstIndexes: [tieData.firstIndex],
+          });
+          outgoingTie.setStyle(tieStyle);
+          outgoingTie.setContext(context).draw();
+
+          const incomingTie = new StaveTie({
+            lastNote: tieData.lastNote,
+            lastIndexes: [tieData.lastIndex],
+          });
+          incomingTie.setStyle(tieStyle);
+          incomingTie.setContext(context).draw();
+        }
+      } catch {
+        /* ignore malformed ties */
+      }
+    });
 
     // Store note positions for highlighting
     notePositionsRef.current = notePositions;
