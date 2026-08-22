@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "test:ps13": "bun scripts/ps13.test.ts",
     "preview": "vite preview",
     "lint": "eslint ."
   },
