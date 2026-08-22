@@ -33,9 +33,13 @@ interface SheetMusicProps {
  * Convert MIDI key signature (-7 to 7) to VexFlow key name
  * Negative = flats, positive = sharps
  */
-function midiKeyToVexFlow(key: number, scale: number): string {
-  // Major keys by number of sharps/flats
-  const majorKeys: Record<string, string> = {
+function midiKeyToVexFlow(key: number): string {
+  // A MIDI key-signature event already stores the signed number of accidentals.
+  // Major and minor modes with the same `key` value therefore use the same
+  // engraved signature; `scale` only identifies the mode. VexFlow interprets
+  // names such as "D" as D major, so mapping D minor to "D" would incorrectly
+  // draw two sharps instead of the one flat encoded by MIDI key = -1.
+  const signaturesByFifths: Record<string, string> = {
     '-7': 'Cb',
     '-6': 'Gb',
     '-5': 'Db',
@@ -52,27 +56,7 @@ function midiKeyToVexFlow(key: number, scale: number): string {
     '6': 'F#',
     '7': 'C#',
   };
-  // Minor keys (relative minor)
-  const minorKeys: Record<string, string> = {
-    '-7': 'Ab',
-    '-6': 'Eb',
-    '-5': 'Bb',
-    '-4': 'F',
-    '-3': 'C',
-    '-2': 'G',
-    '-1': 'D',
-    '0': 'A',
-    '1': 'E',
-    '2': 'B',
-    '3': 'F#',
-    '4': 'C#',
-    '5': 'G#',
-    '6': 'D#',
-    '7': 'A#',
-  };
-
-  const keyMap = scale === 1 ? minorKeys : majorKeys;
-  return keyMap[String(key)] || 'C';
+  return signaturesByFifths[String(key)] || 'C';
 }
 
 /** Get which pitch classes have sharps/flats for a given MIDI key signature */
@@ -1319,14 +1303,8 @@ export function SheetMusic({
         const previousMeasureKey =
           measureIndex > 0 ? keyForMeasure(measureIndex - 1) : measureKey;
         const keyNum = measureKey.key;
-        const vexFlowKey = midiKeyToVexFlow(
-          measureKey.key,
-          measureKey.scale,
-        );
-        const previousVexFlowKey = midiKeyToVexFlow(
-          previousMeasureKey.key,
-          previousMeasureKey.scale,
-        );
+        const vexFlowKey = midiKeyToVexFlow(measureKey.key);
+        const previousVexFlowKey = midiKeyToVexFlow(previousMeasureKey.key);
         const keyChanged =
           measureIndex > 0 &&
           (measureKey.key !== previousMeasureKey.key ||
